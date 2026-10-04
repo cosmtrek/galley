@@ -1,0 +1,20 @@
+---
+source: src/pipeline_tests.rs
+expression: html
+---
+<h2 id="B0" data-block="B0">一、市场规模</h2>
+<p data-block="B1">2025 年全球新增装机 120 GW，同比增长 10%，主要来自中国和美国。</p>
+<table data-block="B2"><thead><tr><th data-cell="0,0">指标</th><th data-cell="0,1">2025</th><th data-cell="0,2">2026E</th></tr></thead><tbody><tr><td data-cell="1,0">装机量</td><td data-cell="1,1">120 GW</td><td data-cell="1,2">160 GW</td></tr></tbody></table>
+<ul>
+<li data-block="B3">中国：政策驱动</li>
+<li data-block="B4">美国：IRA 补贴</li>
+</ul>
+<h2 id="B5" data-block="B5">二、竞争格局</h2>
+<p data-block="B6">宁德时代份额第一，比亚迪第二。</p>
+<p data-block="B7">这一段将被删除，因为它和上一段重复。</p>
+<h2 id="B8" data-block="B8">三、风险</h2>
+<p data-block="B9">原材料价格波动是最大风险。</p>
+<blockquote data-block="B10">
+<p>引用：碳酸锂价格在 2024 年下跌 80%。</p>
+</blockquote>
+<p data-block="B11"><img src="/a/r/fig1.png" alt="图 1"></p>

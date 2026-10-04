@@ -1,0 +1,16 @@
+---
+source: src/pipeline_tests.rs
+expression: "summary.join(\"\\n\")"
+---
+Heading L6-6 "一、市场规模"
+Paragraph L8-8 "2025 年全球新增装机 120 GW，同比增长 10%，主要来自中国和美国。"
+Table L10-12 "指标20252026E装机量120 GW160 GW"
+ListItem L14-14 "中国：政策驱动"
+ListItem L15-15 "美国：IRA 补贴"
+Heading L17-17 "二、竞争格局"
+Paragraph L19-19 "宁德时代份额第一，比亚迪第二。"
+Paragraph L21-21 "这一段将被删除，因为它和上一段重复。"
+Heading L23-23 "三、风险"
+Paragraph L25-25 "原材料价格波动是最大风险。"
+Quote L27-27 "\n引用：碳酸锂价格在 2024 年下跌 80%。\n"
+Image L29-29 ""

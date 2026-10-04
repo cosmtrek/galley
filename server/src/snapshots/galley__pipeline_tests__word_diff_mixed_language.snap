@@ -1,0 +1,30 @@
+---
+source: src/pipeline_tests.rs
+expression: segs
+---
+[
+    Segment {
+        op: Eq,
+        text: "同比增长 ",
+    },
+    Segment {
+        op: Del,
+        text: "10",
+    },
+    Segment {
+        op: Ins,
+        text: "12.3",
+    },
+    Segment {
+        op: Eq,
+        text: "%，主要来自 China and ",
+    },
+    Segment {
+        op: Ins,
+        text: "the ",
+    },
+    Segment {
+        op: Eq,
+        text: "US.",
+    },
+]

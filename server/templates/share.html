@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>{{ title }}</title>
+<meta name="description" content="{{ summary }}">
+<meta property="og:type" content="article">
+<meta property="og:title" content="{{ title }}">
+<meta property="og:description" content="{{ summary }}">
+<meta property="og:url" content="{{ url }}">
+<meta name="twitter:card" content="summary">
+<link rel="stylesheet" href="/static/report.css">
+<link rel="stylesheet" href="/static/share.css">
+</head>
+<body>
+<div class="share">
+  {% if !toc.is_empty() %}
+  <nav class="toc" aria-label="目录">
+    <details open>
+      <summary>目录</summary>
+      <ul>
+        {% for (id, text, level) in toc %}
+        <li class="toc-l{{ level }}"><a href="#{{ id }}">{{ text }}</a></li>
+        {% endfor %}
+      </ul>
+    </details>
+  </nav>
+  {% endif %}
+  <main>
+    <header class="share-head">
+      <h1 class="report-title">{{ title }}</h1>
+      <p class="share-meta">更新于 {{ updated }}</p>
+    </header>
+    <article class="report">
+{{ html|safe }}
+    </article>
+  </main>
+</div>
+</body>
+</html>

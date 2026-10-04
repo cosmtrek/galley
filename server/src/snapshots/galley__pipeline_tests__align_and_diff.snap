@@ -1,0 +1,10 @@
+---
+source: src/pipeline_tests.rs
+expression: "normalize(lines.join(\"\\n\"), &[&old, &new])"
+---
+Modified B1 Paragraph after=None Some("2025 年全球新增装机 120 GW，同比增长 10%，主要来自中国和美国。") -> Some("2025 年全球新增装机 120 GW，同比增长 12.3%（来源：BNEF 2026 年报），主要来自中国和美国。")
+Modified B2 Table after=None Some("指标20252026E装机量120 GW160 GW") -> Some("指标20252026E装机量120 GW170 GW")
+Added B12 ListItem after=None None -> Some("欧洲：电价套利")
+Deleted B7 Paragraph after=Some("B12") Some("这一段将被删除，因为它和上一段重复。") -> None
+Moved B5 Heading after=None Some("二、竞争格局") -> Some("二、竞争格局")
+Moved B6 Paragraph after=None Some("宁德时代份额第一，比亚迪第二。") -> Some("宁德时代份额第一，比亚迪第二。")

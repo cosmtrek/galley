@@ -1,0 +1,6 @@
+/server/target/
+/web/node_modules/
+/web/dist/
+/data/
+*.db
+secrets.json
