@@ -12,15 +12,18 @@ static SANITIZER: LazyLock<ammonia::Builder<'static>> = LazyLock::new(|| {
     b
 });
 
-pub fn rewrite_asset_url(url: &str, asset_prefix: &str) -> String {
+/// Maps the name in an `assets/<name>` reference to the URL it is served from.
+pub type AssetUrl<'a> = &'a dyn Fn(&str) -> String;
+
+pub fn rewrite_asset_url(url: &str, asset_url: AssetUrl) -> String {
     match url.strip_prefix("assets/").or_else(|| url.strip_prefix("./assets/")) {
-        Some(rest) => format!("{asset_prefix}{rest}"),
+        Some(rest) => asset_url(rest),
         None => url.to_string(),
     }
 }
 
 /// Parses a report. Block ids are left empty; the caller assigns them via alignment.
-pub fn parse(markdown: &str, asset_prefix: &str) -> Doc {
+pub fn parse(markdown: &str, asset_url: AssetUrl) -> Doc {
     let (fm, body_start) = split_frontmatter(markdown);
     let body = &markdown[body_start..];
     let lines = LineIndex::new(markdown);
@@ -43,7 +46,7 @@ pub fn parse(markdown: &str, asset_prefix: &str) -> Doc {
                     if let Event::Start(Tag::Item) = events[j].0 {
                         let item_end = matching_end(&events, j);
                         let r = events[j].1.clone();
-                        let mut b = build_block(&events[j..=item_end], asset_prefix);
+                        let mut b = build_block(&events[j..=item_end], body, asset_url);
                         b.src_lines = lines.span(r.start + body_start, r.end + body_start);
                         b.list = Some(info.clone());
                         blocks.push(b);
@@ -56,7 +59,7 @@ pub fn parse(markdown: &str, asset_prefix: &str) -> Doc {
             }
             Event::Start(_) => {
                 let end = matching_end(&events, i);
-                let mut b = build_block(&events[i..=end], asset_prefix);
+                let mut b = build_block(&events[i..=end], body, asset_url);
                 b.src_lines = lines.span(range.start + body_start, range.end + body_start);
                 blocks.push(b);
                 i = end + 1;
@@ -111,12 +114,12 @@ fn matching_end(events: &[(Event, Range<usize>)], start: usize) -> usize {
 }
 
 /// Raw HTML is never rendered; it is shown as literal text.
-fn neutralize<'a>(ev: &Event<'a>, asset_prefix: &str) -> Event<'a> {
+fn neutralize<'a>(ev: &Event<'a>, asset_url: AssetUrl) -> Event<'a> {
     match ev {
         Event::Html(s) | Event::InlineHtml(s) => Event::Text(s.clone()),
         Event::Start(Tag::Image { link_type, dest_url, title, id }) => Event::Start(Tag::Image {
             link_type: *link_type,
-            dest_url: CowStr::from(rewrite_asset_url(dest_url, asset_prefix)),
+            dest_url: CowStr::from(rewrite_asset_url(dest_url, asset_url)),
             title: title.clone(),
             id: id.clone(),
         }),
@@ -124,9 +127,9 @@ fn neutralize<'a>(ev: &Event<'a>, asset_prefix: &str) -> Event<'a> {
     }
 }
 
-fn render_events(events: &[(Event, Range<usize>)], asset_prefix: &str) -> String {
+fn render_events(events: &[(Event, Range<usize>)], asset_url: AssetUrl) -> String {
     let mut out = String::new();
-    html::push_html(&mut out, events.iter().map(|(e, _)| neutralize(e, asset_prefix)));
+    html::push_html(&mut out, events.iter().map(|(e, _)| neutralize(e, asset_url)));
     out
 }
 
@@ -134,7 +137,7 @@ fn sanitize(html: &str) -> String {
     SANITIZER.clean(html).to_string().trim_end().to_string()
 }
 
-fn build_block(events: &[(Event, Range<usize>)], asset_prefix: &str) -> Block {
+fn build_block(events: &[(Event, Range<usize>)], body: &str, asset_url: AssetUrl) -> Block {
     let mut kind = BlockKind::Paragraph;
     let mut level = None;
     let mut sig = String::new();
@@ -144,26 +147,48 @@ fn build_block(events: &[(Event, Range<usize>)], asset_prefix: &str) -> Block {
         Event::Start(Tag::Heading { level: l, .. }) => {
             kind = BlockKind::Heading;
             level = Some(*l as u8);
-            sanitize(&render_events(events, asset_prefix))
+            sanitize(&render_events(events, asset_url))
         }
         Event::Start(Tag::Item) => {
             kind = BlockKind::ListItem;
-            sanitize(&render_events(events, asset_prefix))
+            sanitize(&render_events(events, asset_url))
         }
         Event::Start(Tag::BlockQuote(_)) => {
             kind = BlockKind::Quote;
-            sanitize(&render_events(events, asset_prefix))
+            sanitize(&render_events(events, asset_url))
         }
         Event::Start(Tag::CodeBlock(cb)) => {
-            kind = match cb {
-                CodeBlockKind::Fenced(lang) if lang.as_ref() == "chart" => BlockKind::Chart,
-                _ => BlockKind::Code,
+            let lang = match cb {
+                CodeBlockKind::Fenced(l) => l.split_whitespace().next().unwrap_or("").to_ascii_lowercase(),
+                CodeBlockKind::Indented => String::new(),
             };
-            sanitize(&render_events(events, asset_prefix))
+            let source: String = events
+                .iter()
+                .filter_map(|(e, _)| match e {
+                    Event::Text(s) => Some(s.as_ref()),
+                    _ => None,
+                })
+                .collect();
+            let figure = match lang.as_str() {
+                "mermaid" => render_mermaid(&source).map(|svg| diagram_html(&svg, "流程图")),
+                "svg" => svg_source(&source).map(|svg| diagram_html(&svg, "插图")),
+                _ => None,
+            };
+            match figure {
+                Some(h) => {
+                    kind = BlockKind::Diagram;
+                    sig = format!("{lang}:{source}");
+                    h
+                }
+                None => {
+                    kind = if lang == "chart" { BlockKind::Chart } else { BlockKind::Code };
+                    sanitize(&render_events(events, asset_url))
+                }
+            }
         }
         Event::Start(Tag::Table(_)) => {
             kind = BlockKind::Table;
-            let (h, c) = render_table(events, asset_prefix);
+            let (h, c) = render_table(events, asset_url);
             cells = Some(c);
             sanitize(&h)
         }
@@ -175,7 +200,28 @@ fn build_block(events: &[(Event, Range<usize>)], asset_prefix: &str) -> Block {
                     _ => None,
                 })
                 .collect();
-            sanitize(&format!("<p>{}</p>", escape_html(raw.trim_end())))
+            match svg_source(&raw) {
+                Some(svg) => {
+                    kind = BlockKind::Diagram;
+                    sig = format!("svg:{}", raw.trim());
+                    diagram_html(&svg, "插图")
+                }
+                None => sanitize(&format!("<p>{}</p>", escape_html(raw.trim_end()))),
+            }
+        }
+        Event::Start(Tag::Paragraph)
+            if matches!(events.get(1), Some((Event::InlineHtml(h), _)) if h.trim_start().to_ascii_lowercase().starts_with("<svg")) =>
+        {
+            // A one-line `<svg>…</svg>` is not an HTML block in CommonMark, only inline HTML.
+            let raw = &body[events[0].1.clone()];
+            match svg_source(raw) {
+                Some(svg) => {
+                    kind = BlockKind::Diagram;
+                    sig = format!("svg:{}", raw.trim());
+                    diagram_html(&svg, "插图")
+                }
+                None => sanitize(&render_events(events, asset_url)),
+            }
         }
         Event::Start(Tag::Paragraph) => {
             let inner = &events[1..events.len() - 1];
@@ -188,9 +234,9 @@ fn build_block(events: &[(Event, Range<usize>)], asset_prefix: &str) -> Block {
                     sig = dest_url.to_string();
                 }
             }
-            sanitize(&render_events(events, asset_prefix))
+            sanitize(&render_events(events, asset_url))
         }
-        _ => sanitize(&render_events(events, asset_prefix)),
+        _ => sanitize(&render_events(events, asset_url)),
     };
 
     let text = html_text_content(&html);
@@ -210,7 +256,7 @@ fn build_block(events: &[(Event, Range<usize>)], asset_prefix: &str) -> Block {
 
 /// Tables are rendered by hand so cells carry `data-cell="row,col"` and no whitespace text
 /// nodes appear between cells (keeping block text equal to the concatenated cell texts).
-fn render_table(events: &[(Event, Range<usize>)], asset_prefix: &str) -> (String, Vec<Vec<String>>) {
+fn render_table(events: &[(Event, Range<usize>)], asset_url: AssetUrl) -> (String, Vec<Vec<String>>) {
     let mut out = String::from("<table>");
     let mut rows: Vec<Vec<String>> = Vec::new();
     let mut in_head = false;
@@ -234,7 +280,7 @@ fn render_table(events: &[(Event, Range<usize>)], asset_prefix: &str) -> (String
             }
             Event::Start(Tag::TableCell) => {
                 let end = matching_end(events, i);
-                let inner = render_events(&events[i + 1..end], asset_prefix);
+                let inner = render_events(&events[i + 1..end], asset_url);
                 let tag = if in_head { "th" } else { "td" };
                 let (r, c) = (rows.len(), row.len());
                 out.push_str(&format!("<{tag} data-cell=\"{r},{c}\">{inner}</{tag}>"));
@@ -251,6 +297,51 @@ fn render_table(events: &[(Event, Range<usize>)], asset_prefix: &str) -> (String
 
 fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+const MAX_DIAGRAM_SOURCE: usize = 256 * 1024;
+
+fn render_mermaid(source: &str) -> Option<String> {
+    if source.trim().is_empty() || source.len() > MAX_DIAGRAM_SOURCE {
+        return None;
+    }
+    // The renderer is third-party layout code; a panic on odd input must not fail the import.
+    std::panic::catch_unwind(|| {
+        mermaid_rs_renderer::render_with_options(source, mermaid_rs_renderer::RenderOptions::default()).ok()
+    })
+    .ok()
+    .flatten()
+}
+
+/// Accepts a standalone SVG document and makes sure it declares the SVG namespace, which
+/// browsers require before they decode it as an image.
+fn svg_source(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if s.len() > MAX_DIAGRAM_SOURCE {
+        return None;
+    }
+    let lower = s.to_ascii_lowercase();
+    let open = lower.find("<svg")?;
+    let head = lower[..open].trim();
+    let prolog_only = head.is_empty() || (head.starts_with("<?xml") || head.starts_with("<!")) && head.ends_with('>');
+    if !prolog_only || !lower.ends_with("</svg>") {
+        return None;
+    }
+    let tag_end = open + s[open..].find('>')?;
+    if s[open..tag_end].contains("xmlns=") {
+        return Some(s.to_string());
+    }
+    let at = open + 4;
+    Some(format!("{} xmlns=\"http://www.w3.org/2000/svg\"{}", &s[..at], &s[at..]))
+}
+
+/// SVG is shown through `<img>` rather than inlined: images never run scripts, load external
+/// resources, or leak `<style>` into the page, so untrusted SVG needs no sanitizing, and the
+/// block has no text nodes that could shift anchor offsets.
+fn diagram_html(svg: &str, alt: &str) -> String {
+    use base64::Engine;
+    let data = base64::engine::general_purpose::STANDARD.encode(svg.as_bytes());
+    format!("<figure class=\"diagram\"><img src=\"data:image/svg+xml;base64,{data}\" alt=\"{alt}\"></figure>")
 }
 
 fn split_frontmatter(md: &str) -> (Frontmatter, usize) {

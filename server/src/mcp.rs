@@ -196,7 +196,7 @@ fn handle(s: &Shared, role: Role, msg: &Value) -> Option<Value> {
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
             match call_tool(s, role, name, &args) {
                 Ok(text) => rpc_result(&id, json!({ "content": [{ "type": "text", "text": text }], "isError": false })),
-                Err(e) => rpc_result(&id, json!({ "content": [{ "type": "text", "text": e.to_string() }], "isError": true })),
+                Err(e) => rpc_result(&id, json!({ "content": [{ "type": "text", "text": e.client_message() }], "isError": true })),
             }
         }
         _ => rpc_error(&id, -32601, &format!("method not found: {method}")),

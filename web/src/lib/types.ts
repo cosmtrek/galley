@@ -11,6 +11,7 @@ export type BlockKind =
   | "table"
   | "code"
   | "chart"
+  | "diagram"
   | "image"
   | "quote"
   | "rule";
@@ -25,6 +26,8 @@ export type Anchor =
       block_id: string;
       cell?: [number, number] | null;
       start: number;
+      /** Set when the selection crosses blocks; `end` is then an offset into this block. */
+      end_block_id?: string | null;
       end: number;
       quote: string;
       prefix: string;

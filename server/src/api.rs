@@ -134,7 +134,8 @@ async fn login(State(s): State<Shared>, Json(req): Json<LoginReq>) -> AppResult<
     }
     let token = s.store().create_session()?;
     let secure = if s.config.secure_cookies { "; Secure" } else { "" };
-    let cookie = format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000{secure}");
+    let max_age = crate::store::SESSION_TTL_MS / 1000;
+    let cookie = format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}{secure}");
     let mut resp = Json(json!({ "ok": true })).into_response();
     resp.headers_mut().insert(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap());
     Ok(resp)

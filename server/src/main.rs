@@ -27,7 +27,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use rust_embed::RustEmbed;
 
-use api::{AppState, Config, Shared};
+use api::{AppState, Auth, Config, Shared};
 use store::Store;
 
 #[derive(RustEmbed)]
@@ -42,7 +42,8 @@ pub fn app(state: Shared) -> Router {
         .merge(api::router())
         .route("/mcp", get(mcp::get).post(mcp::post))
         .route("/s/{token}", get(share::page))
-        .route("/a/{report}/{name}", get(asset))
+        .route("/s/{token}/a/{*rest}", get(share::asset))
+        .route("/a/{report}/{*rest}", get(asset))
         .route("/static/report.css", get(|| async { css(REPORT_CSS) }))
         .route("/static/share.css", get(|| async { css(SHARE_CSS) }))
         .route("/", get(|| async { Redirect::temporary("/app") }))
@@ -58,19 +59,25 @@ fn css(body: &'static str) -> Response {
         .into_response()
 }
 
-async fn asset(State(s): State<Shared>, Path((report, name)): Path<(String, String)>) -> Response {
-    match s.store().asset(&report, &name) {
-        Ok((mime, bytes)) => {
-            let mut resp = bytes.into_response();
-            let h = resp.headers_mut();
-            h.insert(header::CONTENT_TYPE, HeaderValue::from_str(&mime).unwrap_or(HeaderValue::from_static("application/octet-stream")));
-            h.insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=3600"));
-            h.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
-            h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("default-src 'none'; sandbox"));
-            resp
+/// Report assets for the workbench and agents. Share pages use `/s/<token>/a/...` instead.
+async fn asset(State(s): State<Shared>, _: Auth, Path((report, rest)): Path<(String, String)>) -> Response {
+    match s.store().asset(&report, &rest) {
+        // Content-addressed URLs never change meaning; bare names follow the latest upload.
+        Ok((mime, bytes, immutable)) => {
+            asset_response(&mime, bytes, if immutable { "private, max-age=31536000, immutable" } else { "private, no-cache" })
         }
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+pub fn asset_response(mime: &str, bytes: Vec<u8>, cache: &'static str) -> Response {
+    let mut resp = bytes.into_response();
+    let h = resp.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_str(mime).unwrap_or(HeaderValue::from_static("application/octet-stream")));
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+    h.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+    h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("default-src 'none'; sandbox"));
+    resp
 }
 
 fn embedded(path: &str) -> Option<Response> {
@@ -159,10 +166,13 @@ async fn main() {
         secure_cookies: env_or("GALLEY_PUBLIC_URL", "").starts_with("https://"),
     };
     let conn = db::open(&data_dir.join("galley.db")).expect("cannot open database");
-    let state = Arc::new(AppState {
-        store: Mutex::new(Store::new(conn, data_dir.join("assets"))),
-        config: config.clone(),
-    });
+    let mut store = Store::new(conn, data_dir.join("assets"));
+    match store.migrate_legacy_assets() {
+        Ok(0) => {}
+        Ok(n) => println!("moved {n} assets to content-addressed storage"),
+        Err(e) => eprintln!("asset migration failed: {e}"),
+    }
+    let state = Arc::new(AppState { store: Mutex::new(store), config: config.clone() });
 
     let listener = tokio::net::TcpListener::bind(addr).await.expect("cannot bind");
     println!("galley listening on {}", config.public_url);

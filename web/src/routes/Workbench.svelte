@@ -508,7 +508,6 @@
     try {
       await post(`/api/reports/${id}/rounds`);
       await load();
-      roundOpen = true;
     } catch (e) {
       alert((e as Error).message);
     } finally {

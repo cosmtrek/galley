@@ -23,6 +23,10 @@ pub fn asset_prefix(report_id: &str) -> String {
     format!("/a/{report_id}/")
 }
 
+pub fn share_asset_prefix(token: &str) -> String {
+    format!("/s/{token}/a/")
+}
+
 // ---------- API types ----------
 
 #[derive(Debug, Serialize, Default, Clone)]
@@ -231,8 +235,8 @@ pub struct SharePage {
     pub toc: Vec<(String, String, u8)>,
 }
 
-pub enum ShareLookup {
-    Found(SharePage),
+pub enum ShareLookup<T> {
+    Found(T),
     Revoked,
     NotFound,
 }
@@ -259,7 +263,7 @@ impl Store {
             "INSERT INTO reports (id, title, summary, created_at, updated_at) VALUES (?1, '', '', ?2, ?2)",
             params![id, now],
         )?;
-        insert_version(&tx, &id, markdown, None, "初稿")?;
+        insert_version(&tx, &id, markdown, None, "初稿", &HashMap::new())?;
         tx.commit()?;
         self.report_info(&id)
     }
@@ -354,9 +358,19 @@ impl Store {
 
     /// Pushes a new version outside the round flow (agent revision or owner rollback).
     pub fn push_version(&mut self, report_id: &str, markdown: &str, note: &str) -> AppResult<Version> {
+        self.push_version_pinned(report_id, markdown, note, &HashMap::new())
+    }
+
+    fn push_version_pinned(
+        &mut self,
+        report_id: &str,
+        markdown: &str,
+        note: &str,
+        pinned: &HashMap<String, String>,
+    ) -> AppResult<Version> {
         self.ensure_no_pending_round(report_id)?;
         let tx = self.conn.transaction()?;
-        let (vid, relocs) = insert_version(&tx, report_id, markdown, None, note)?;
+        let (vid, relocs) = insert_version(&tx, report_id, markdown, None, note, pinned)?;
         for (cid, state) in relocs {
             if state == AnchorState::Orphaned {
                 transition_comment(&tx, &cid, CommentAction::Orphan, Role::Agent)?;
@@ -371,7 +385,9 @@ impl Store {
         if target.report_id != report_id {
             return Err(AppError::NotFound);
         }
-        self.push_version(report_id, &target.markdown.clone(), &format!("回退到 v{}", target.seq))
+        // Restore the images the target was rendered with, not whatever was uploaded since.
+        let pinned = asset_refs(&target.html, &asset_prefix(report_id));
+        self.push_version_pinned(report_id, &target.markdown, &format!("回退到 v{}", target.seq), &pinned)
     }
 
     pub fn compare(&self, from: &str, to: &str) -> AppResult<Comparison> {
@@ -401,7 +417,7 @@ impl Store {
     }
 
     pub fn add_asset(&mut self, report_id: &str, name: &str, bytes: &[u8]) -> AppResult<String> {
-        self.report_info(report_id)?;
+        self.conn.query_row("SELECT 1 FROM reports WHERE id = ?1", [report_id], |_| Ok(()))?;
         let valid = !name.is_empty()
             && name.len() <= 128
             && name.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
@@ -414,25 +430,86 @@ impl Store {
             return Err(AppError::BadRequest("only images can be uploaded".into()));
         }
         let sha = hex::encode(Sha256::digest(bytes));
-        let dir = self.assets_dir.join(report_id);
-        std::fs::create_dir_all(&dir)?;
-        let path = dir.join(name);
-        std::fs::write(&path, bytes)?;
-        self.conn.execute(
-            "INSERT INTO assets (id, report_id, name, sha256, mime, path, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT (report_id, name) DO UPDATE SET sha256 = excluded.sha256, mime = excluded.mime",
-            params![short_id("a_", 10), report_id, name, sha, mime.to_string(), path.to_string_lossy(), now_ms()],
+        self.write_blob(report_id, &sha, bytes)?;
+        let now = now_ms();
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO asset_blobs (report_id, sha256, mime, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![report_id, sha, mime.to_string(), now],
         )?;
+        tx.execute(
+            "INSERT INTO assets (id, report_id, name, sha256, mime, path, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT (report_id, name) DO UPDATE SET sha256 = excluded.sha256, mime = excluded.mime, path = excluded.path",
+            params![short_id("a_", 10), report_id, name, sha, mime.to_string(), blob_key(report_id, &sha), now],
+        )?;
+        tx.commit()?;
         Ok(format!("assets/{name}"))
     }
 
-    pub fn asset(&self, report_id: &str, name: &str) -> AppResult<(String, Vec<u8>)> {
-        let (mime, path): (String, String) = self.conn.query_row(
-            "SELECT mime, path FROM assets WHERE report_id = ?1 AND name = ?2",
-            [report_id, name],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+    /// Blobs are immutable: content that is already stored is never rewritten.
+    fn write_blob(&self, report_id: &str, sha: &str, bytes: &[u8]) -> AppResult<()> {
+        let path = self.assets_dir.join(blob_key(report_id, sha));
+        if path.exists() {
+            return Ok(());
+        }
+        std::fs::create_dir_all(path.parent().unwrap_or(&self.assets_dir))?;
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(())
+    }
+
+    /// Serves `<sha256>/<name>` (exact content, cacheable forever) or a bare `<name>` (the latest
+    /// upload under that name, used by versions rendered before the asset existed).
+    /// Returns `(mime, bytes, immutable)`.
+    pub fn asset(&self, report_id: &str, rest: &str) -> AppResult<(String, Vec<u8>, bool)> {
+        let (sha, immutable) = match rest.split_once('/') {
+            Some((sha, _)) => (sha.to_string(), true),
+            None => (
+                self.conn.query_row(
+                    "SELECT sha256 FROM assets WHERE report_id = ?1 AND name = ?2",
+                    [report_id, rest],
+                    |r| r.get(0),
+                )?,
+                false,
+            ),
+        };
+        // The lookup also guarantees `sha` is a stored hash, so it is safe to use as a file name.
+        let mime: String = self.conn.query_row(
+            "SELECT mime FROM asset_blobs WHERE report_id = ?1 AND sha256 = ?2",
+            [report_id, &sha],
+            |r| r.get(0),
         )?;
-        Ok((mime, std::fs::read(path)?))
+        Ok((mime, std::fs::read(self.assets_dir.join(blob_key(report_id, &sha)))?, immutable))
+    }
+
+    /// Files used to live at `<report>/<name>` and were overwritten in place. Copies each one to
+    /// its content-addressed path; the old file is left where it is.
+    pub fn migrate_legacy_assets(&mut self) -> AppResult<usize> {
+        let rows: Vec<(String, String, String, String, i64)> = self
+            .conn
+            .prepare("SELECT report_id, name, sha256, mime, created_at FROM assets")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+            .collect::<Result<_, _>>()?;
+        let mut moved = 0;
+        for (report, name, sha, mime, created) in rows {
+            if self.assets_dir.join(blob_key(&report, &sha)).exists() {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(self.assets_dir.join(&report).join(&name)) else { continue };
+            let actual = hex::encode(Sha256::digest(&bytes));
+            self.write_blob(&report, &actual, &bytes)?;
+            self.conn.execute(
+                "INSERT OR IGNORE INTO asset_blobs (report_id, sha256, mime, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![report, actual, mime, created],
+            )?;
+            self.conn.execute(
+                "UPDATE assets SET sha256 = ?3, path = ?4 WHERE report_id = ?1 AND name = ?2",
+                params![report, name, actual, blob_key(&report, &actual)],
+            )?;
+            moved += 1;
+        }
+        Ok(moved)
     }
 
     // ----- comments -----
@@ -465,14 +542,15 @@ impl Store {
         }
         let v = self.current_version(report_id)?;
         let anchor = req.anchor.validate(&v.doc)?;
-        let id = short_id("c_", 6);
         let now = now_ms();
         let tx = self.conn.transaction()?;
-        tx.execute(
-            "INSERT INTO comments (id, report_id, status, body, created_version_id, created_at, updated_at)
-             VALUES (?1, ?2, 'draft', ?3, ?4, ?5, ?5)",
-            params![id, report_id, req.body.trim(), v.id, now],
-        )?;
+        let id = insert_with_id("c_", 6, |id| {
+            tx.execute(
+                "INSERT INTO comments (id, report_id, status, body, created_version_id, created_at, updated_at)
+                 VALUES (?1, ?2, 'draft', ?3, ?4, ?5, ?5)",
+                params![id, report_id, req.body.trim(), v.id, now],
+            )
+        })?;
         tx.execute(
             "INSERT INTO comment_anchors (comment_id, version_id, anchor, state) VALUES (?1, ?2, ?3, 'exact')",
             params![id, v.id, serde_json::to_string(&anchor)?],
@@ -616,11 +694,12 @@ impl Store {
         let seq: i64 =
             tx.query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM rounds WHERE report_id = ?1", [report_id], |r| r.get(0))?;
         let base: String = tx.query_row("SELECT current_version_id FROM reports WHERE id = ?1", [report_id], |r| r.get(0))?;
-        let rid = short_id("rd_", 6);
-        tx.execute(
-            "INSERT INTO rounds (id, report_id, seq, status, base_version_id, submitted_at) VALUES (?1, ?2, ?3, 'submitted', ?4, ?5)",
-            params![rid, report_id, seq, base, now_ms()],
-        )?;
+        let rid = insert_with_id("rd_", 6, |rid| {
+            tx.execute(
+                "INSERT INTO rounds (id, report_id, seq, status, base_version_id, submitted_at) VALUES (?1, ?2, ?3, 'submitted', ?4, ?5)",
+                params![rid, report_id, seq, base, now_ms()],
+            )
+        })?;
         for id in &ids {
             transition_comment(&tx, id, CommentAction::Submit, Role::Owner)?;
             tx.execute("UPDATE comments SET round_id = ?2 WHERE id = ?1", params![id, rid])?;
@@ -632,9 +711,8 @@ impl Store {
 
     pub fn claim(&mut self, round_id: &str, role: Role) -> AppResult<Round> {
         let tx = self.conn.transaction()?;
-        let r = load_round(&tx, round_id)?;
-        let lease_expired = r.claimed_at.is_some_and(|t| now_ms() - t > LEASE_MS);
-        let next = round_transition(r.status, RoundAction::Claim { lease_expired }, role)?;
+        let r = load_round_raw(&tx, round_id)?;
+        let next = round_transition(r.status, RoundAction::Claim { lease_expired: lease_expired(&r) }, role)?;
         tx.execute(
             "UPDATE rounds SET status = ?2, claimed_at = ?3 WHERE id = ?1",
             params![round_id, next.as_str(), now_ms()],
@@ -666,7 +744,7 @@ impl Store {
 
     pub fn submit_result(&mut self, round_id: &str, role: Role, req: ResultReq) -> AppResult<Round> {
         let tx = self.conn.transaction()?;
-        let round = load_round(&tx, round_id)?;
+        let round = load_round_raw(&tx, round_id)?;
         let next = round_transition(round.status, RoundAction::Result, role)?;
 
         let open: Vec<String> = tx
@@ -702,7 +780,8 @@ impl Store {
         let mut relocs = Vec::new();
         let mut diff = None;
         if let Some(md) = req.markdown.as_deref().filter(|m| m.trim() != base.markdown.trim()) {
-            let (vid, r) = insert_version(&tx, &round.report_id, md, Some(round_id), &format!("第 {} 轮修改", round.seq))?;
+            let note = format!("第 {} 轮修改", round.seq);
+            let (vid, r) = insert_version(&tx, &round.report_id, md, Some(round_id), &note, &HashMap::new())?;
             result_vid = vid;
             relocs = r;
             diff = load_version(&tx, &result_vid)?.diff;
@@ -728,8 +807,8 @@ impl Store {
             None => Vec::new(),
         };
         tx.execute(
-            "UPDATE rounds SET status = ?2, result_version_id = ?3, summary = ?4, extra_changes = ?5, completed_at = ?6 WHERE id = ?1",
-            params![round_id, next.as_str(), result_vid, req.summary.trim(), serde_json::to_string(&extra)?, now_ms()],
+            "UPDATE rounds SET status = ?2, result_version_id = ?3, summary = ?4, extra_changes = ?5 WHERE id = ?1",
+            params![round_id, next.as_str(), result_vid, req.summary.trim(), serde_json::to_string(&extra)?],
         )?;
         maybe_complete_round(&tx, round_id)?;
         touch_report(&tx, &round.report_id)?;
@@ -737,17 +816,27 @@ impl Store {
         self.round(round_id)
     }
 
+    /// Confirms one extra change (or all of them); the round completes once nothing is left.
     pub fn confirm_extra(&mut self, round_id: &str, block_id: Option<&str>) -> AppResult<Round> {
-        let mut round = self.round(round_id)?;
+        let tx = self.conn.transaction()?;
+        let mut round = load_round_raw(&tx, round_id)?;
+        round_transition(round.status, RoundAction::ConfirmExtra, Role::Owner)?;
+        if let Some(b) = block_id
+            && !round.extra_changes.iter().any(|e| e.change.block_id == b)
+        {
+            return Err(AppError::BadRequest(format!("{b} is not an extra change of this round")));
+        }
         for e in &mut round.extra_changes {
             if block_id.is_none_or(|b| b == e.change.block_id) {
                 e.confirmed = true;
             }
         }
-        self.conn.execute(
+        tx.execute(
             "UPDATE rounds SET extra_changes = ?2 WHERE id = ?1",
             params![round_id, serde_json::to_string(&round.extra_changes)?],
         )?;
+        maybe_complete_round(&tx, round_id)?;
+        tx.commit()?;
         self.round(round_id)
     }
 
@@ -775,19 +864,25 @@ impl Store {
                     .map(|b| b.section_id.clone())
                     .filter(|s| !s.is_empty());
             }
+            let spans = |a: &Anchor| matches!(a, Anchor::Text { end_block_id: Some(_), .. });
             let mut change = None;
-            for id in [base_anchor.as_ref().and_then(|a| a.block_id()), c.anchor.block_id()].into_iter().flatten() {
-                if let Some(ch) = diff.get(id) {
-                    change = Some(ch.clone());
-                    break;
+            let mut section_changes = Vec::new();
+            if let Anchor::Section { section_id } = &c.anchor {
+                section_changes = diff.changes.iter().filter(|ch| &ch.section_id == section_id).cloned().collect();
+            } else if spans(&c.anchor) || base_anchor.as_ref().is_some_and(spans) {
+                let mut ids: HashSet<String> = c.anchor.block_ids(&target.doc).into_iter().collect();
+                if let Some(a) = &base_anchor {
+                    ids.extend(a.block_ids(&base.doc));
+                }
+                section_changes = diff.changes.iter().filter(|ch| ids.contains(&ch.block_id)).cloned().collect();
+            } else {
+                for id in [base_anchor.as_ref().and_then(|a| a.block_id()), c.anchor.block_id()].into_iter().flatten() {
+                    if let Some(ch) = diff.get(id) {
+                        change = Some(ch.clone());
+                        break;
+                    }
                 }
             }
-            let section_changes = match &c.anchor {
-                Anchor::Section { section_id } => {
-                    diff.changes.iter().filter(|ch| &ch.section_id == section_id).cloned().collect()
-                }
-                _ => Vec::new(),
-            };
             let section_title = c.section_id.as_ref().and_then(|s| titles.get(s).cloned());
             items.push(ReviewItem { comment: c, base_anchor, section_title, change, section_changes });
         }
@@ -847,14 +942,12 @@ impl Store {
                 )?;
                 p.id
             }
-            None => {
-                let id = short_id("p_", 8);
+            None => insert_with_id("p_", 8, |id| {
                 self.conn.execute(
                     "INSERT INTO publications (id, report_id, version_id, token, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
                     params![id, report_id, v.id, random_token(), now],
-                )?;
-                id
-            }
+                )
+            })?,
         };
         self.publications(report_id)?.into_iter().find(|p| p.id == id).ok_or(AppError::NotFound)
     }
@@ -867,8 +960,8 @@ impl Store {
         if n == 0 { Err(AppError::NotFound) } else { Ok(()) }
     }
 
-    /// Looks up a share token and records the view. Only published HTML leaves this function.
-    pub fn share(&mut self, token: &str) -> AppResult<ShareLookup> {
+    /// The live publication behind a share token: `(publication_id, version_id, updated_at)`.
+    fn publication_by_token(&self, token: &str) -> AppResult<ShareLookup<(String, String, i64)>> {
         let row: Option<(String, String, Option<i64>, i64)> = self
             .conn
             .query_row(
@@ -877,14 +970,25 @@ impl Store {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?;
-        let Some((pid, vid, revoked, updated_at)) = row else {
-            return Ok(ShareLookup::NotFound);
+        Ok(match row {
+            None => ShareLookup::NotFound,
+            Some((_, _, Some(_), _)) => ShareLookup::Revoked,
+            Some((pid, vid, None, updated_at)) => ShareLookup::Found((pid, vid, updated_at)),
+        })
+    }
+
+    /// Looks up a share token and records the view. Only published HTML leaves this function.
+    pub fn share(&mut self, token: &str) -> AppResult<ShareLookup<SharePage>> {
+        let (pid, vid, updated_at) = match self.publication_by_token(token)? {
+            ShareLookup::Found(p) => p,
+            ShareLookup::Revoked => return Ok(ShareLookup::Revoked),
+            ShareLookup::NotFound => return Ok(ShareLookup::NotFound),
         };
-        if revoked.is_some() {
-            return Ok(ShareLookup::Revoked);
-        }
-        let (html, blocks): (String, String) =
-            self.conn.query_row("SELECT html, blocks FROM versions WHERE id = ?1", [&vid], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let (report_id, html, blocks): (String, String, String) = self.conn.query_row(
+            "SELECT report_id, html, blocks FROM versions WHERE id = ?1",
+            [&vid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
         let doc: Doc = serde_json::from_str(&blocks)?;
         let now = now_ms();
         self.conn.execute(
@@ -898,32 +1002,93 @@ impl Store {
             .filter(|b| b.kind == BlockKind::Heading && matches!(b.level, Some(2 | 3)))
             .map(|b| (b.id.clone(), b.text.clone(), b.level.unwrap_or(2)))
             .collect();
-        let html = crate::doc::strip_data_attrs(&html);
+        // Assets go through the token so they die with the link and the report id stays private.
+        // Text content always has `"` escaped, so this only rewrites attribute values.
+        let html = crate::doc::strip_data_attrs(&html)
+            .replace(&format!("\"{}", asset_prefix(&report_id)), &format!("\"{}", share_asset_prefix(token)));
         Ok(ShareLookup::Found(SharePage { title: doc.title, summary: doc.summary, html, updated_at, toc }))
+    }
+
+    /// Serves an asset of a share page, but only one the published version actually references.
+    pub fn share_asset(&self, token: &str, rest: &str) -> AppResult<ShareLookup<(String, Vec<u8>)>> {
+        let vid = match self.publication_by_token(token)? {
+            ShareLookup::Found((_, vid, _)) => vid,
+            ShareLookup::Revoked => return Ok(ShareLookup::Revoked),
+            ShareLookup::NotFound => return Ok(ShareLookup::NotFound),
+        };
+        let (report_id, html): (String, String) =
+            self.conn.query_row("SELECT report_id, html FROM versions WHERE id = ?1", [&vid], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        if !html.contains(&format!("\"{}{rest}\"", asset_prefix(&report_id))) {
+            return Ok(ShareLookup::NotFound);
+        }
+        match self.asset(&report_id, rest) {
+            Ok((mime, bytes, _)) => Ok(ShareLookup::Found((mime, bytes))),
+            Err(AppError::NotFound) => Ok(ShareLookup::NotFound),
+            Err(e) => Err(e),
+        }
     }
 
     // ----- sessions -----
 
     pub fn create_session(&mut self) -> AppResult<String> {
         let token = random_token();
-        self.conn.execute("INSERT INTO sessions (token, created_at) VALUES (?1, ?2)", params![token, now_ms()])?;
+        let now = now_ms();
+        self.conn.execute("DELETE FROM sessions WHERE created_at <= ?1", [now - SESSION_TTL_MS])?;
+        self.conn.execute("INSERT INTO sessions (token, created_at) VALUES (?1, ?2)", params![session_key(&token), now])?;
         Ok(token)
     }
 
     pub fn session_valid(&self, token: &str) -> AppResult<bool> {
-        let created: Option<i64> =
-            self.conn.query_row("SELECT created_at FROM sessions WHERE token = ?1", [token], |r| r.get(0)).optional()?;
-        Ok(created.is_some_and(|t| now_ms() - t < 30 * 24 * 3600 * 1000))
+        let created: Option<i64> = self
+            .conn
+            .query_row("SELECT created_at FROM sessions WHERE token = ?1", [session_key(token)], |r| r.get(0))
+            .optional()?;
+        Ok(created.is_some_and(|t| now_ms() - t < SESSION_TTL_MS))
     }
 
     pub fn delete_session(&mut self, token: &str) -> AppResult<()> {
-        self.conn.execute("DELETE FROM sessions WHERE token = ?1", [token])?;
+        self.conn.execute("DELETE FROM sessions WHERE token = ?1", [session_key(token)])?;
         Ok(())
     }
 }
 
 // ---------- helpers ----------
 
+/// Path of an uploaded file relative to the assets directory, so the data directory can move.
+fn blob_key(report_id: &str, sha: &str) -> String {
+    format!("{report_id}/{sha}")
+}
+
+/// The `name → sha256` asset references a rendered version was built with.
+fn asset_refs(html: &str, prefix: &str) -> HashMap<String, String> {
+    let open = format!("\"{prefix}");
+    html.split(open.as_str())
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next()?.split_once('/'))
+        .map(|(sha, name)| (name.to_string(), sha.to_string()))
+        .collect()
+}
+
+pub const SESSION_TTL_MS: i64 = 30 * 24 * 3600 * 1000;
+
+/// Sessions are stored hashed so a leaked database does not hand out logged-in cookies.
+fn session_key(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+/// Short readable ids can collide; retries with a fresh id when the primary key is taken.
+fn insert_with_id(prefix: &str, len: usize, mut insert: impl FnMut(&str) -> rusqlite::Result<usize>) -> AppResult<String> {
+    for _ in 0..4 {
+        let id = short_id(prefix, len);
+        match insert(&id) {
+            Ok(_) => return Ok(id),
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Err(AppError::Internal(format!("could not allocate a unique {prefix} id")))
+}
 
 fn touch_report(tx: &Connection, report_id: &str) -> AppResult<()> {
     tx.execute("UPDATE reports SET updated_at = ?2 WHERE id = ?1", params![report_id, now_ms()])?;
@@ -953,9 +1118,11 @@ fn transition_comment(tx: &Transaction, id: &str, action: CommentAction, role: R
     Ok(next)
 }
 
+/// A verifying round is done once no comment awaits verification and every edit outside the
+/// comments has been confirmed.
 fn maybe_complete_round(tx: &Transaction, round_id: &str) -> AppResult<()> {
-    let status: String = tx.query_row("SELECT status FROM rounds WHERE id = ?1", [round_id], |r| r.get(0))?;
-    if status != RoundStatus::Verifying.as_str() {
+    let round = load_round_raw(tx, round_id)?;
+    if round.status != RoundStatus::Verifying {
         return Ok(());
     }
     let waiting: i64 = tx.query_row(
@@ -963,9 +1130,12 @@ fn maybe_complete_round(tx: &Transaction, round_id: &str) -> AppResult<()> {
         [round_id],
         |r| r.get(0),
     )?;
-    if waiting == 0 {
+    if waiting == 0 && round.extra_changes.iter().all(|e| e.confirmed) {
         let next = round_transition(RoundStatus::Verifying, RoundAction::Complete, Role::Owner)?;
-        tx.execute("UPDATE rounds SET status = ?2 WHERE id = ?1", params![round_id, next.as_str()])?;
+        tx.execute(
+            "UPDATE rounds SET status = ?2, completed_at = ?3 WHERE id = ?1",
+            params![round_id, next.as_str(), now_ms()],
+        )?;
     }
     Ok(())
 }
@@ -996,6 +1166,7 @@ fn insert_version(
     markdown: &str,
     round_id: Option<&str>,
     note: &str,
+    pinned: &HashMap<String, String>,
 ) -> AppResult<(String, Vec<(String, AnchorState)>)> {
     if markdown.trim().is_empty() {
         return Err(AppError::BadRequest("markdown is empty".into()));
@@ -1006,7 +1177,17 @@ fn insert_version(
         .flatten();
     let prev = prev_id.as_deref().map(|id| load_version(tx, id)).transpose()?;
 
-    let mut doc = parse(markdown, &asset_prefix(report_id));
+    let latest: HashMap<String, String> = tx
+        .prepare("SELECT name, sha256 FROM assets WHERE report_id = ?1")?
+        .query_map([report_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    let prefix = asset_prefix(report_id);
+    // Rendering the content hash into the URL is what keeps each version's images fixed.
+    let asset_url = |name: &str| match pinned.get(name).or_else(|| latest.get(name)) {
+        Some(sha) => format!("{prefix}{sha}/{name}"),
+        None => format!("{prefix}{name}"),
+    };
+    let mut doc = parse(markdown, &asset_url);
     let diff = match &prev {
         Some(p) => {
             align(&p.doc, &mut doc);
@@ -1019,23 +1200,15 @@ fn insert_version(
     };
     let html = doc.render_html();
     let seq = prev.as_ref().map_or(1, |p| p.seq + 1);
-    let vid = short_id("v_", 8);
-    tx.execute(
-        "INSERT INTO versions (id, report_id, seq, markdown, html, blocks, block_diff, round_id, note, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        params![
-            vid,
-            report_id,
-            seq,
-            markdown,
-            html,
-            serde_json::to_string(&doc)?,
-            diff.as_ref().map(serde_json::to_string).transpose()?,
-            round_id,
-            note,
-            now_ms()
-        ],
-    )?;
+    let blocks = serde_json::to_string(&doc)?;
+    let diff_json = diff.as_ref().map(serde_json::to_string).transpose()?;
+    let vid = insert_with_id("v_", 8, |vid| {
+        tx.execute(
+            "INSERT INTO versions (id, report_id, seq, markdown, html, blocks, block_diff, round_id, note, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![vid, report_id, seq, markdown, html, blocks, diff_json, round_id, note, now_ms()],
+        )
+    })?;
 
     let mut relocs = Vec::new();
     if let Some(p) = &prev {
@@ -1096,34 +1269,47 @@ fn load_version(conn: &Connection, id: &str) -> AppResult<Version> {
     })
 }
 
-fn load_round(conn: &Connection, id: &str) -> AppResult<Round> {
-    let mut round = conn.query_row(
+/// Reads a round exactly as stored. State changes must start from this, not from `load_round`.
+fn load_round_raw(conn: &Connection, id: &str) -> AppResult<Round> {
+    let (mut round, status, extra): (Round, String, String) = conn.query_row(
         "SELECT id, report_id, seq, status, base_version_id, result_version_id, summary, extra_changes,
                 submitted_at, claimed_at, completed_at,
                 (SELECT COUNT(*) FROM comments WHERE round_id = rounds.id)
          FROM rounds WHERE id = ?1",
         [id],
         |r| {
-            let status: String = r.get(3)?;
-            let extra: String = r.get(7)?;
-            Ok(Round {
+            let round = Round {
                 id: r.get(0)?,
                 report_id: r.get(1)?,
                 seq: r.get(2)?,
-                status: RoundStatus::parse(&status).unwrap_or(RoundStatus::Submitted),
+                status: RoundStatus::Submitted,
                 base_version_id: r.get(4)?,
                 result_version_id: r.get(5)?,
                 summary: r.get(6)?,
-                extra_changes: serde_json::from_str(&extra).unwrap_or_default(),
+                extra_changes: Vec::new(),
                 submitted_at: r.get(8)?,
                 claimed_at: r.get(9)?,
                 completed_at: r.get(10)?,
                 comment_count: r.get(11)?,
-            })
+            };
+            Ok((round, r.get(3)?, r.get(7)?))
         },
     )?;
-    // An abandoned claim is released lazily: the round reads as submitted again.
-    if round.status == RoundStatus::Processing && round.claimed_at.is_some_and(|t| now_ms() - t > LEASE_MS) {
+    round.status = RoundStatus::parse(&status).ok_or_else(|| AppError::Internal(format!("bad round status {status}")))?;
+    // Failing loudly matters: a defaulted empty list would be written back by `confirm_extra`.
+    round.extra_changes = serde_json::from_str(&extra)?;
+    Ok(round)
+}
+
+fn lease_expired(round: &Round) -> bool {
+    round.status == RoundStatus::Processing && round.claimed_at.is_some_and(|t| now_ms() - t > LEASE_MS)
+}
+
+/// Reads a round for display. An abandoned claim is released lazily: the round reads as
+/// submitted again, while `claim` sees the stored status and re-claims it through `domain`.
+fn load_round(conn: &Connection, id: &str) -> AppResult<Round> {
+    let mut round = load_round_raw(conn, id)?;
+    if lease_expired(&round) {
         round.status = RoundStatus::Submitted;
     }
     Ok(round)
@@ -1260,7 +1446,18 @@ fn packet_comment(c: &Comment, doc: &Doc) -> PacketComment {
         }
         Anchor::Text { block_id, quote, .. } => ("text", Some(quote.clone()), doc.block(block_id)),
     };
+    let last = match &c.anchor {
+        Anchor::Text { end_block_id: Some(l), .. } => doc.block(l).or(block),
+        _ => block,
+    };
     let idx = block.and_then(|b| doc.index_of(&b.id));
+    let last_idx = last.and_then(|b| doc.index_of(&b.id));
+    let block_text = match (idx, last_idx) {
+        (Some(i), Some(j)) if j > i => {
+            Some(doc.blocks[i..=j].iter().map(|b| b.text.as_str()).collect::<Vec<_>>().join("\n"))
+        }
+        _ => block.map(|b| b.text.clone()),
+    };
     let neighbor = |i: Option<usize>| i.and_then(|i| doc.blocks.get(i)).map(|b| b.text.clone());
     let section = c
         .section_id
@@ -1277,7 +1474,7 @@ fn packet_comment(c: &Comment, doc: &Doc) -> PacketComment {
                 .unwrap_or_else(|| doc.blocks.last().map_or(0, |b| b.src_lines.1));
             (doc.blocks[i].src_lines.0, end)
         }),
-        _ => block.map(|b| b.src_lines),
+        _ => block.zip(last).map(|(b, l)| (b.src_lines.0, l.src_lines.1.max(b.src_lines.1))),
     };
     PacketComment {
         id: c.id.clone(),
@@ -1286,9 +1483,9 @@ fn packet_comment(c: &Comment, doc: &Doc) -> PacketComment {
         anchor_type: anchor_type.to_string(),
         section,
         quote,
-        block_text: block.filter(|_| anchor_type != "section").map(|b| b.text.clone()),
+        block_text: block_text.filter(|_| anchor_type != "section"),
         context_before: if anchor_type == "section" { None } else { neighbor(idx.and_then(|i| i.checked_sub(1))) },
-        context_after: if anchor_type == "section" { None } else { neighbor(idx.map(|i| i + 1)) },
+        context_after: if anchor_type == "section" { None } else { neighbor(last_idx.map(|i| i + 1)) },
         src_lines,
         messages: c.messages.iter().filter(|m| !m.body.is_empty()).cloned().collect(),
     }
@@ -1313,11 +1510,7 @@ fn extra_changes(tx: &Transaction, round_id: &str, base: &Doc, diff: &BlockDiff)
                     sections.insert(section_id);
                 }
                 Anchor::Document => {}
-                other => {
-                    if let Some(b) = other.block_id() {
-                        blocks.insert(b.to_string());
-                    }
-                }
+                other => blocks.extend(other.block_ids(base)),
             }
         }
     }

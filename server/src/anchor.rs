@@ -23,12 +23,16 @@ pub enum Anchor {
         row: u32,
         col: u32,
     },
-    /// Offsets are Unicode code points within the block (or cell) text.
+    /// Offsets are Unicode code points within the block (or cell) text. A selection that
+    /// crosses blocks sets `end_block_id`; `start` is then an offset into `block_id` and `end`
+    /// an offset into `end_block_id`, and `quote` joins the covered block texts with `\n`.
     Text {
         block_id: BlockId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cell: Option<(u32, u32)>,
         start: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_block_id: Option<BlockId>,
         end: u32,
         quote: String,
         #[serde(default)]
@@ -82,6 +86,19 @@ impl Anchor {
         }
     }
 
+    /// Every block the anchor covers in `doc`, in document order (sections excluded).
+    pub fn block_ids(&self, doc: &Doc) -> Vec<String> {
+        match self {
+            Anchor::Text { block_id, end_block_id: Some(last), .. } => {
+                match (doc.index_of(block_id), doc.index_of(last)) {
+                    (Some(i), Some(j)) if i <= j => doc.blocks[i..=j].iter().map(|b| b.id.clone()).collect(),
+                    _ => vec![block_id.clone(), last.clone()],
+                }
+            }
+            a => a.block_id().map(|b| vec![b.to_string()]).unwrap_or_default(),
+        }
+    }
+
     /// Validates a freshly created anchor against a version and normalizes its context.
     pub fn validate(mut self, doc: &Doc) -> Result<Anchor, AnchorError> {
         match &mut self {
@@ -99,7 +116,23 @@ impl Anchor {
                 let b = doc.block(block_id).ok_or_else(|| AnchorError::NoBlock(block_id.clone()))?;
                 b.cell_text(*row, *col).ok_or(AnchorError::NoCell(*row, *col))?;
             }
-            Anchor::Text { block_id, cell, start, end, quote, prefix, suffix } => {
+            Anchor::Text { block_id, cell, start, end_block_id: Some(last), end, quote, prefix, suffix } => {
+                let i = doc.index_of(block_id).ok_or_else(|| AnchorError::NoBlock(block_id.clone()))?;
+                let j = doc.index_of(last).ok_or_else(|| AnchorError::NoBlock(last.clone()))?;
+                if cell.is_some() || i >= j {
+                    return Err(AnchorError::Range);
+                }
+                let (s, e) = (*start as usize, *end as usize);
+                if s >= doc.blocks[i].text.chars().count() || e == 0 || e > doc.blocks[j].text.chars().count() {
+                    return Err(AnchorError::Range);
+                }
+                let (q, p, sfx) = span_context(doc, i, j, s, e);
+                if !quote.is_empty() && q != *quote {
+                    return Err(AnchorError::Quote);
+                }
+                (*quote, *prefix, *suffix) = (q, p, sfx);
+            }
+            Anchor::Text { block_id, cell, start, end, quote, prefix, suffix, .. } => {
                 let b = doc.block(block_id).ok_or_else(|| AnchorError::NoBlock(block_id.clone()))?;
                 let text = target_text(b, *cell).ok_or(AnchorError::NoCell(0, 0))?;
                 let chars: Vec<char> = text.chars().collect();
@@ -151,7 +184,10 @@ pub fn relocate(anchor: &Anchor, old: &Doc, new: &Doc) -> (Anchor, AnchorState) 
             Some(_) => (Anchor::Block { block_id: block_id.clone() }, AnchorState::Fuzzy),
             None => (anchor.clone(), AnchorState::Orphaned),
         },
-        Anchor::Text { block_id, cell, start, end, quote, prefix, suffix } => {
+        Anchor::Text { block_id, start, end_block_id: Some(last), end, prefix, suffix, .. } => {
+            relocate_span(anchor, block_id, last, *start as usize, *end as usize, prefix, suffix, old, new)
+        }
+        Anchor::Text { block_id, cell, start, end, quote, prefix, suffix, .. } => {
             if let Some(b) = new.block(block_id) {
                 if let Some(text) = target_text(b, *cell) {
                     let chars: Vec<char> = text.chars().collect();
@@ -183,6 +219,93 @@ pub fn relocate(anchor: &Anchor, old: &Doc, new: &Doc) -> (Anchor, AnchorState) 
     }
 }
 
+/// Relocates a cross-block anchor by finding its head (start..end of the first block) and its
+/// tail (beginning..end of the last block) separately. If only one end survives, the comment
+/// narrows to that block.
+#[allow(clippy::too_many_arguments)]
+fn relocate_span(
+    anchor: &Anchor,
+    first: &str,
+    last: &str,
+    start: usize,
+    end: usize,
+    prefix: &str,
+    suffix: &str,
+    old: &Doc,
+    new: &Doc,
+) -> (Anchor, AnchorState) {
+    let old_chars = |id: &str| old.block(id).map(|b| b.text.chars().collect::<Vec<char>>()).unwrap_or_default();
+    let head_old = old_chars(first);
+    let tail_old = old_chars(last);
+    let head_q: String = head_old.get(start..).unwrap_or_default().iter().collect();
+    let tail_q: String = tail_old.get(..end.min(tail_old.len())).unwrap_or_default().iter().collect();
+
+    let head = new.index_of(first).and_then(|i| {
+        let chars: Vec<char> = new.blocks[i].text.chars().collect();
+        let qlen = head_q.chars().count();
+        locate(&chars, start, start + qlen, &head_q, prefix, "").map(|(s, _, st)| (i, s, chars.len(), st))
+    });
+    let tail = new.index_of(last).and_then(|j| {
+        let chars: Vec<char> = new.blocks[j].text.chars().collect();
+        locate(&chars, 0, tail_q.chars().count(), &tail_q, "", suffix).map(|(_, e, st)| (j, e, st))
+    });
+
+    let worst = |a: AnchorState, b: AnchorState| {
+        let rank = |s: AnchorState| match s {
+            AnchorState::Exact => 0,
+            AnchorState::Moved => 1,
+            AnchorState::Fuzzy => 2,
+            AnchorState::Orphaned => 3,
+        };
+        if rank(a) >= rank(b) { a } else { b }
+    };
+    match (head, tail) {
+        (Some((i, s, _, hs)), Some((j, e, ts))) if i < j && e > 0 => {
+            let (quote, prefix, suffix) = span_context(new, i, j, s, e);
+            let mut st = worst(hs, ts);
+            if st == AnchorState::Exact {
+                st = worst(moved_or_exact(old, new, first), moved_or_exact(old, new, last));
+            }
+            let a = Anchor::Text {
+                block_id: first.to_string(),
+                cell: None,
+                start: s as u32,
+                end_block_id: Some(last.to_string()),
+                end: e as u32,
+                quote,
+                prefix,
+                suffix,
+            };
+            (a, st)
+        }
+        (Some((i, s, len, _)), _) => {
+            let chars: Vec<char> = new.blocks[i].text.chars().collect();
+            (text_anchor(first, None, &chars, s, len), AnchorState::Fuzzy)
+        }
+        (None, Some((j, e, _))) if e > 0 => {
+            let chars: Vec<char> = new.blocks[j].text.chars().collect();
+            (text_anchor(last, None, &chars, 0, e), AnchorState::Fuzzy)
+        }
+        _ => match [first, last].into_iter().find(|id| new.block(id).is_some()) {
+            Some(id) => (Anchor::Block { block_id: id.to_string() }, AnchorState::Fuzzy),
+            None => (anchor.clone(), AnchorState::Orphaned),
+        },
+    }
+}
+
+/// Quote, prefix and suffix for a selection from `s` in block `i` to `e` in block `j`.
+fn span_context(doc: &Doc, i: usize, j: usize, s: usize, e: usize) -> (String, String, String) {
+    let first: Vec<char> = doc.blocks[i].text.chars().collect();
+    let last: Vec<char> = doc.blocks[j].text.chars().collect();
+    let mut parts: Vec<String> = Vec::with_capacity(j - i + 1);
+    parts.push(first[s..].iter().collect());
+    parts.extend(doc.blocks[i + 1..j].iter().map(|b| b.text.clone()));
+    parts.push(last[..e].iter().collect());
+    let (prefix, _) = context(&first, s, first.len());
+    let (_, suffix) = context(&last, 0, e);
+    (parts.join("\n"), prefix, suffix)
+}
+
 fn moved_or_exact(old: &Doc, new: &Doc, id: &str) -> AnchorState {
     let section = |d: &Doc| d.block(id).map(|b| b.section_id.clone());
     if section(old) == section(new) { AnchorState::Exact } else { AnchorState::Moved }
@@ -194,6 +317,7 @@ fn text_anchor(block_id: &str, cell: Option<(u32, u32)>, chars: &[char], s: usiz
         block_id: block_id.to_string(),
         cell,
         start: s as u32,
+        end_block_id: None,
         end: e as u32,
         quote: chars[s..e].iter().collect(),
         prefix,

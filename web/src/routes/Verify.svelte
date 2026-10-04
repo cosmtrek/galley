@@ -211,9 +211,9 @@
       <div class="section-title row">
         <span>评论之外的改动（{extra.length}）</span>
         <span class="spacer"></span>
-        {#if extraPending}<button disabled={busy === "extra"} onclick={() => confirmExtra(null)}>全部确认</button>{/if}
+        {#if extraPending && r.status === "verifying"}<button disabled={busy === "extra"} onclick={() => confirmExtra(null)}>全部确认</button>{/if}
       </div>
-      <p class="muted small">这些块发生了变化，但没有被本轮任何评论锚定。确认它们是你想要的改动。</p>
+      <p class="muted small">这些块发生了变化，但没有被本轮任何评论锚定。确认它们是你想要的改动，全部确认后本轮才算完成。</p>
       {#each extra as ch (ch.block_id)}
         <div class="vitem" class:done={ch.confirmed}>
           <div class="vhead">
@@ -222,7 +222,7 @@
             {#if ch.confirmed}<span class="badge s-resolved">已确认</span>{/if}
           </div>
           <div class="vbody"><ChangeView change={ch} /></div>
-          {#if !ch.confirmed}
+          {#if !ch.confirmed && r.status === "verifying"}
             <div class="actions">
               <button disabled={busy === "extra"} onclick={() => confirmExtra(ch.block_id)}>确认</button>
               <span class="muted small">不想要的话，回批注页对这段写一条评论，下一轮让 AI 改回去。</span>
@@ -235,7 +235,9 @@
     <div class="row" style="margin-top: 32px">
       <a href="/app/r/{id}">← 回批注页写新评论</a>
       <span class="spacer"></span>
-      {#if r.status === "done"}
+      {#if r.status === "verifying" && stat.verify === 0 && extraPending}
+        <span class="muted">还有 {extraPending} 处评论之外的改动待确认，确认后本轮才会完成。</span>
+      {:else if r.status === "done"}
         <span class="muted">本轮已完成。</span>
         {#if report && report.counts.draft + report.counts.open > 0}
           <a href="/app/r/{id}">提交下一轮 →</a>

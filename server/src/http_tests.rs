@@ -8,7 +8,7 @@ use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use crate::api::{AppState, Config};
+use crate::api::{AppState, Config, Shared};
 use crate::store::Store;
 
 const AGENT: &str = "test-agent-token";
@@ -16,6 +16,7 @@ const PASSWORD: &str = "test-password";
 
 struct T {
     app: axum::Router,
+    state: Shared,
     cookie: String,
 }
 
@@ -31,7 +32,7 @@ impl T {
                 secure_cookies: false,
             },
         });
-        let app = crate::app(state);
+        let app = crate::app(state.clone());
         let resp = app
             .clone()
             .oneshot(
@@ -44,7 +45,15 @@ impl T {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let cookie = resp.headers()[header::SET_COOKIE].to_str().unwrap().split(';').next().unwrap().to_string();
-        T { app, cookie }
+        T { app, state, cookie }
+    }
+
+    async fn upload(&self, rid: &str, name: &str, bytes: &'static [u8]) -> StatusCode {
+        let req = Request::post(format!("/api/reports/{rid}/assets?name={name}"))
+            .header(header::AUTHORIZATION, format!("Bearer {AGENT}"))
+            .body(Body::from(bytes))
+            .unwrap();
+        self.app.clone().oneshot(req).await.unwrap().status()
     }
 
     async fn req(&self, method: &str, path: &str, who: Who, body: Option<Value>) -> (StatusCode, Value, String) {
@@ -248,6 +257,7 @@ async fn full_round_and_privacy() {
     }
     assert!(headers.contains("noindex"));
     assert!(headers.contains("script-src 'none'"));
+    assert!(headers.contains("img-src 'self' data:"));
     assert!(headers.contains("no-referrer"));
 
     // Republishing keeps the link; revoking returns 410; unknown tokens 404.
@@ -294,4 +304,146 @@ async fn mcp_tools() {
     assert!(round["result"]["content"][0]["text"].as_str().unwrap().contains("没有待处理"));
     let (st, _, _) = t.req("POST", "/mcp", Who::Owner, Some(call(5, "tools/list", json!({})))).await;
     assert_eq!(st, StatusCode::FORBIDDEN);
+}
+
+fn first_img_src(html: &str) -> String {
+    html.split("<img src=\"").nth(1).unwrap().split('"').next().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn assets_are_private_and_published_snapshots_are_fixed() {
+    let t = T::new().await;
+    let (_, r, _) = t.req("POST", "/api/reports", Who::Agent, Some(json!({ "markdown": V1 }))).await;
+    let rid = r["id"].as_str().unwrap().to_string();
+    assert_eq!(t.upload(&rid, "fig.png", b"IMAGE-ONE").await, StatusCode::OK);
+    assert_eq!(t.upload(&rid, "other.png", b"UNPUBLISHED").await, StatusCode::OK);
+    let md = format!("{V1}\n![图](assets/fig.png)\n");
+    let (st, _, _) = t.req("POST", &format!("/api/reports/{rid}/versions"), Who::Agent, Some(json!({ "markdown": md }))).await;
+    assert_eq!(st, StatusCode::OK);
+
+    let (_, report, _) = t.req("GET", &format!("/api/reports/{rid}"), Who::Owner, None).await;
+    let src = first_img_src(report["version"]["html"].as_str().unwrap());
+    assert!(src.starts_with(&format!("/a/{rid}/")) && src.ends_with("/fig.png"), "{src}");
+
+    // Workbench URLs need a login; content-addressed ones can be cached forever.
+    let (st, _, _) = t.req("GET", &src, Who::Anon, None).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    let (st, body, headers) = t.req("GET", &src, Who::Owner, None).await;
+    assert_eq!((st, body.as_str().unwrap()), (StatusCode::OK, "IMAGE-ONE"));
+    assert!(headers.contains("immutable") && headers.contains("private"), "{headers}");
+
+    let (_, p, _) = t.req("POST", &format!("/api/reports/{rid}/publications"), Who::Owner, None).await;
+    let path = p["publication"]["path"].as_str().unwrap().to_string();
+    let pid = p["publication"]["id"].as_str().unwrap().to_string();
+    let (_, html, _) = t.req("GET", &path, Who::Anon, None).await;
+    let html = html.as_str().unwrap();
+    assert!(!html.contains(&rid), "share page leaked the report id");
+    let shared = first_img_src(html);
+    assert!(shared.starts_with(&format!("{path}/a/")), "{shared}");
+    let (st, body, headers) = t.req("GET", &shared, Who::Anon, None).await;
+    assert_eq!((st, body.as_str().unwrap()), (StatusCode::OK, "IMAGE-ONE"));
+    assert!(headers.contains("no-cache") && !headers.contains("public"), "{headers}");
+
+    // Only assets the published version references are reachable through the link.
+    for other in [format!("{path}/a/other.png"), format!("{path}/a/fig.png")] {
+        let (st, _, _) = t.req("GET", &other, Who::Anon, None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "{other}");
+    }
+
+    // Re-uploading under the same name does not change what was published.
+    assert_eq!(t.upload(&rid, "fig.png", b"IMAGE-TWO").await, StatusCode::OK);
+    let (_, body, _) = t.req("GET", &shared, Who::Anon, None).await;
+    assert_eq!(body.as_str().unwrap(), "IMAGE-ONE");
+    let (_, body, _) = t.req("GET", &format!("/a/{rid}/fig.png"), Who::Owner, None).await;
+    assert_eq!(body.as_str().unwrap(), "IMAGE-TWO");
+
+    // A new version picks up the new image; rolling back restores the old one.
+    let (_, v, _) = t.req("POST", &format!("/api/reports/{rid}/versions"), Who::Agent, Some(json!({ "markdown": format!("{md}\n新增一段。\n") }))).await;
+    let (_, cur, _) = t.req("GET", &format!("/api/versions/{}", v["id"].as_str().unwrap()), Who::Owner, None).await;
+    let (_, body, _) = t.req("GET", &first_img_src(cur["html"].as_str().unwrap()), Who::Owner, None).await;
+    assert_eq!(body.as_str().unwrap(), "IMAGE-TWO");
+    let (_, versions, _) = t.req("GET", &format!("/api/reports/{rid}/versions"), Who::Owner, None).await;
+    let v2 = versions.as_array().unwrap().iter().find(|v| v["seq"] == 2).unwrap()["id"].as_str().unwrap().to_string();
+    let (st, rb, _) = t.req("POST", &format!("/api/reports/{rid}/rollback"), Who::Owner, Some(json!({ "version_id": v2 }))).await;
+    assert_eq!(st, StatusCode::OK, "{rb}");
+    let (_, report, _) = t.req("GET", &format!("/api/reports/{rid}"), Who::Owner, None).await;
+    let (_, body, _) = t.req("GET", &first_img_src(report["version"]["html"].as_str().unwrap()), Who::Owner, None).await;
+    assert_eq!(body.as_str().unwrap(), "IMAGE-ONE");
+
+    // Revoking the link revokes its images too.
+    t.req("POST", &format!("/api/publications/{pid}/revoke"), Who::Owner, None).await;
+    let (st, _, _) = t.req("GET", &shared, Who::Anon, None).await;
+    assert_eq!(st, StatusCode::GONE);
+}
+
+#[tokio::test]
+async fn extra_changes_must_be_confirmed_before_the_round_is_done() {
+    let t = T::new().await;
+    let (_, r, _) = t.req("POST", "/api/reports", Who::Agent, Some(json!({ "markdown": V1 }))).await;
+    let rid = r["id"].as_str().unwrap().to_string();
+    let (_, report, _) = t.req("GET", &format!("/api/reports/{rid}"), Who::Owner, None).await;
+    let para = block_id(&report, "同比增长");
+    let (_, c, _) = t
+        .req("POST", &format!("/api/reports/{rid}/comments"), Who::Owner, Some(json!({ "body": "核实", "anchor": { "type": "block", "block_id": para } })))
+        .await;
+    let cid = c["id"].as_str().unwrap().to_string();
+    let (_, round, _) = t.req("POST", &format!("/api/reports/{rid}/rounds"), Who::Owner, None).await;
+    let round_id = round["id"].as_str().unwrap().to_string();
+
+    // V2 also edits the uncommented risk paragraph.
+    let (_, res, _) = t
+        .req("POST", &format!("/api/rounds/{round_id}/result"), Who::Agent, Some(json!({ "markdown": V2, "summary": "x",
+            "replies": [{ "comment_id": cid, "action": "changed", "body": "已改" }] })))
+        .await;
+    let extra = res["extra_changes"].as_array().unwrap();
+    assert_eq!(extra.len(), 1, "{res}");
+    assert!(res["completed_at"].is_null(), "{res}");
+    let extra_block = extra[0]["block_id"].as_str().unwrap().to_string();
+
+    t.req("POST", &format!("/api/comments/{cid}/resolve"), Who::Owner, None).await;
+    let (_, rd, _) = t.req("GET", &format!("/api/rounds/{round_id}"), Who::Owner, None).await;
+    assert_eq!(rd["status"], "verifying");
+
+    let confirm = format!("/api/rounds/{round_id}/extra/confirm");
+    let (st, _, _) = t.req("POST", &confirm, Who::Agent, Some(json!({}))).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    let (st, _, _) = t.req("POST", &confirm, Who::Owner, Some(json!({ "block_id": "b_nope" }))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, rd, _) = t.req("POST", &confirm, Who::Owner, Some(json!({ "block_id": extra_block }))).await;
+    assert_eq!(st, StatusCode::OK, "{rd}");
+    assert_eq!(rd["status"], "done");
+    assert!(rd["completed_at"].is_i64(), "{rd}");
+    let (st, _, _) = t.req("POST", &confirm, Who::Owner, Some(json!({}))).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn expired_claims_are_reclaimed() {
+    let t = T::new().await;
+    let (_, r, _) = t.req("POST", "/api/reports", Who::Agent, Some(json!({ "markdown": V1 }))).await;
+    let rid = r["id"].as_str().unwrap().to_string();
+    t.req("POST", &format!("/api/reports/{rid}/comments"), Who::Owner, Some(json!({ "body": "全文", "anchor": { "type": "document" } })))
+        .await;
+    let (_, round, _) = t.req("POST", &format!("/api/reports/{rid}/rounds"), Who::Owner, None).await;
+    let claim = format!("/api/rounds/{}/claim", round["id"].as_str().unwrap());
+    let (st, _, _) = t.req("POST", &claim, Who::Agent, None).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, _, _) = t.req("POST", &claim, Who::Agent, None).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    t.state.store().conn.execute("UPDATE rounds SET claimed_at = 0", []).unwrap();
+    let (_, rd, _) = t.req("GET", &format!("/api/reports/{rid}/rounds"), Who::Owner, None).await;
+    assert_eq!(rd[0]["status"], "submitted");
+    let (st, rd, _) = t.req("POST", &claim, Who::Agent, None).await;
+    assert_eq!(st, StatusCode::OK, "{rd}");
+    assert_eq!(rd["status"], "processing");
+}
+
+#[tokio::test]
+async fn sessions_are_stored_hashed() {
+    let t = T::new().await;
+    let raw = t.cookie.split_once('=').unwrap().1.to_string();
+    let store = t.state.store();
+    let n: i64 = store.conn.query_row("SELECT COUNT(*) FROM sessions WHERE token = ?1", [&raw], |r| r.get(0)).unwrap();
+    assert_eq!(n, 0);
+    assert!(store.session_valid(&raw).unwrap());
 }

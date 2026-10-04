@@ -5,6 +5,10 @@ use crate::anchor::{Anchor, AnchorState, relocate};
 use crate::diff::{ChangeOp, compare, word_diff};
 use crate::doc::{BlockKind, Doc, parse};
 
+fn prefix(p: &str) -> impl Fn(&str) -> String + '_ {
+    move |name| format!("{p}{name}")
+}
+
 const V1: &str = r#"---
 title: 2026 储能行业调研
 summary: 一句话摘要
@@ -67,7 +71,7 @@ summary: 一句话摘要
 "#;
 
 fn v1() -> Doc {
-    let mut d = parse(V1, "/a/r/");
+    let mut d = parse(V1, &prefix("/a/r/"));
     assign_fresh(&mut d);
     d
 }
@@ -115,7 +119,7 @@ fn block_text_matches_html() {
 
 #[test]
 fn raw_html_is_escaped() {
-    let d = parse("<script>alert(1)</script>\n\nhi <b onclick=x>there</b> [x](javascript:alert(1))\n", "/a/");
+    let d = parse("<script>alert(1)</script>\n\nhi <b onclick=x>there</b> [x](javascript:alert(1))\n", &prefix("/a/"));
     let html = d.blocks.iter().map(|b| b.html.clone()).collect::<Vec<_>>().join("\n");
     assert!(!html.contains("<script"), "{html}");
     assert!(!html.contains("<b"), "{html}");
@@ -125,7 +129,7 @@ fn raw_html_is_escaped() {
 #[test]
 fn align_and_diff() {
     let old = v1();
-    let mut new = parse(V2, "/a/r/");
+    let mut new = parse(V2, &prefix("/a/r/"));
     align(&old, &mut new);
     let diff = compare(&old, &new);
     let lines: Vec<String> = diff
@@ -156,9 +160,9 @@ fn align_and_diff() {
 fn reordered_renumbered_sections_keep_ids() {
     let src_old = "# T\n\n## 3.1 装机\n\n装机量持续增长，同比提升三成。\n\n## 3.2 成本\n\n电芯成本下降明显。\n\n## 3.3 价格战\n\n价格战导致毛利率承压。\n";
     let src_new = "# T\n\n## 3.1 价格战\n\n价格战导致毛利率承压。\n\n## 3.2 装机\n\n装机量持续增长，同比提升三成。\n\n## 3.3 成本\n\n电芯成本下降明显。\n";
-    let mut old = parse(src_old, "/a/");
+    let mut old = parse(src_old, &prefix("/a/"));
     assign_fresh(&mut old);
-    let mut new = parse(src_new, "/a/");
+    let mut new = parse(src_new, &prefix("/a/"));
     align(&old, &mut new);
     for nb in &new.blocks {
         let ob = old.blocks.iter().find(|b| b.id == nb.id).expect("id inherited");
@@ -179,7 +183,7 @@ fn word_diff_mixed_language() {
 #[test]
 fn identical_versions_have_no_changes() {
     let old = v1();
-    let mut new = parse(V1, "/a/r/");
+    let mut new = parse(V1, &prefix("/a/r/"));
     align(&old, &mut new);
     assert!(compare(&old, &new).changes.is_empty());
     let ids: Vec<_> = old.blocks.iter().map(|b| &b.id).collect();
@@ -196,6 +200,7 @@ fn text_anchor(doc: &Doc, needle: &str) -> Anchor {
         block_id: b.id.clone(),
         cell: None,
         start,
+        end_block_id: None,
         end,
         quote: needle.into(),
         prefix: String::new(),
@@ -208,7 +213,7 @@ fn text_anchor(doc: &Doc, needle: &str) -> Anchor {
 #[test]
 fn relocate_anchors() {
     let old = v1();
-    let mut new = parse(V2, "/a/r/");
+    let mut new = parse(V2, &prefix("/a/r/"));
     align(&old, &mut new);
 
     // Unchanged text in an unchanged block.
@@ -249,7 +254,7 @@ fn relocate_anchors() {
 
 #[test]
 fn anchor_offsets_use_code_points() {
-    let mut d = parse("前缀😀生僻字𠀀之后的文字\n", "/a/");
+    let mut d = parse("前缀😀生僻字𠀀之后的文字\n", &prefix("/a/"));
     assign_fresh(&mut d);
     let a = text_anchor(&d, "𠀀之后");
     match a {
@@ -263,6 +268,7 @@ fn anchor_offsets_use_code_points() {
         block_id: d.blocks[0].id.clone(),
         cell: None,
         start: 0,
+        end_block_id: None,
         end: 2,
         quote: "错误".into(),
         prefix: String::new(),
@@ -273,12 +279,93 @@ fn anchor_offsets_use_code_points() {
 
 #[test]
 fn deleted_block_quote_found_elsewhere() {
-    let mut old = parse("## A\n\n第一段，包含关键句子：储能成本下降。\n\n## B\n\n别的内容。\n", "/a/");
+    let mut old = parse("## A\n\n第一段，包含关键句子：储能成本下降。\n\n## B\n\n别的内容。\n", &prefix("/a/"));
     assign_fresh(&mut old);
-    let mut new = parse("## A\n\n## B\n\n别的内容。储能成本下降。这是一段完全重写的文字，和原段落差别很大很大很大。\n", "/a/");
+    let mut new = parse("## A\n\n## B\n\n别的内容。储能成本下降。这是一段完全重写的文字，和原段落差别很大很大很大。\n", &prefix("/a/"));
     align(&old, &mut new);
     let a = text_anchor(&old, "储能成本下降");
     let (na, st) = relocate(&a, &old, &new);
     assert_eq!(st, AnchorState::Moved);
     assert_eq!(na.block_id(), Some(new.blocks[2].id.as_str()));
+}
+
+#[test]
+fn cross_block_anchor() {
+    let old = v1();
+    let first = old.blocks.iter().find(|b| b.text.starts_with("宁德时代")).unwrap();
+    let last = old.blocks.iter().find(|b| b.text.starts_with("这一段")).unwrap();
+    let a = Anchor::Text {
+        block_id: first.id.clone(),
+        cell: None,
+        start: 9,
+        end_block_id: Some(last.id.clone()),
+        end: 3,
+        quote: String::new(),
+        prefix: String::new(),
+        suffix: String::new(),
+    }
+    .validate(&old)
+    .unwrap();
+    match &a {
+        Anchor::Text { quote, prefix, suffix, .. } => {
+            assert_eq!(quote, "比亚迪第二。\n这一段");
+            assert_eq!(prefix, "宁德时代份额第一，");
+            assert!(suffix.starts_with("将被删除"), "{suffix}");
+        }
+        _ => unreachable!(),
+    }
+    assert_eq!(a.block_ids(&old), vec![first.id.clone(), last.id.clone()]);
+
+    // Unchanged document: stays a span.
+    let mut same = parse(V1, &prefix("/a/r/"));
+    align(&old, &mut same);
+    let (na, st) = relocate(&a, &old, &same);
+    assert_eq!(st, AnchorState::Exact);
+    assert_eq!(na, a);
+
+    // The last block is deleted in V2: the comment narrows to the surviving head.
+    let mut new = parse(V2, &prefix("/a/r/"));
+    align(&old, &mut new);
+    let (na, st) = relocate(&a, &old, &new);
+    assert_eq!(st, AnchorState::Fuzzy);
+    match na {
+        Anchor::Text { quote, end_block_id, .. } => {
+            assert_eq!(quote, "比亚迪第二。");
+            assert_eq!(end_block_id, None);
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // Reversed or same-block spans are rejected.
+    let bad = Anchor::Text {
+        block_id: last.id.clone(),
+        cell: None,
+        start: 0,
+        end_block_id: Some(first.id.clone()),
+        end: 2,
+        quote: String::new(),
+        prefix: String::new(),
+        suffix: String::new(),
+    };
+    assert!(bad.validate(&old).is_err());
+}
+
+#[test]
+fn diagrams_render_as_images() {
+    use base64::Engine;
+    let md = "```mermaid\nflowchart LR\n  A[开始] --> B{判断}\n  B -->|是| C[结束]\n```\n\n```svg\n<svg viewBox=\"0 0 10 10\"><script>alert(1)</script><circle r=\"4\"/></svg>\n```\n\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\"><rect width=\"20\" height=\"20\"/></svg>\n\n```mermaid\nnot a diagram ][\n```\n\n<div onclick=\"x\">raw</div>\n";
+    let d = parse(md, &prefix("/a/"));
+    let kinds: Vec<BlockKind> = d.blocks.iter().map(|b| b.kind).collect();
+    assert_eq!(kinds, [BlockKind::Diagram, BlockKind::Diagram, BlockKind::Diagram, BlockKind::Code, BlockKind::Paragraph]);
+    for b in &d.blocks[..3] {
+        assert!(b.html.starts_with("<figure class=\"diagram\"><img src=\"data:image/svg+xml;base64,"), "{}", b.html);
+        assert_eq!(b.text, "");
+        assert!(!b.sig.is_empty());
+    }
+    // Inline SVG is only ever decoded as an image, with the namespace browsers require.
+    let b64 = d.blocks[1].html.split("base64,").nth(1).unwrap().split('"').next().unwrap();
+    let svg = String::from_utf8(base64::engine::general_purpose::STANDARD.decode(b64).unwrap()).unwrap();
+    assert!(svg.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox"), "{svg}");
+    assert!(!d.render_html().contains("<svg"));
+    assert!(d.blocks[4].html.contains("&lt;div"), "{}", d.blocks[4].html);
 }

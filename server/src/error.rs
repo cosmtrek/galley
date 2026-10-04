@@ -57,6 +57,19 @@ impl From<crate::anchor::AnchorError> for AppError {
     }
 }
 
+impl AppError {
+    /// The message safe to show a client. Internal details are logged instead of returned.
+    pub fn client_message(&self) -> String {
+        match self {
+            AppError::Internal(m) => {
+                eprintln!("internal error: {m}");
+                "internal error".into()
+            }
+            e => e.to_string(),
+        }
+    }
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = match &self {
@@ -65,11 +78,20 @@ impl IntoResponse for AppError {
             AppError::Forbidden(_) => StatusCode::FORBIDDEN,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::Conflict(_) => StatusCode::CONFLICT,
-            AppError::Internal(m) => {
-                eprintln!("internal error: {m}");
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        (status, Json(json!({ "error": self.to_string() }))).into_response()
+        (status, Json(json!({ "error": self.client_message() }))).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn internal_details_stay_on_the_server() {
+        let e = AppError::from(rusqlite::Error::InvalidQuery);
+        assert_eq!(e.client_message(), "internal error");
+        assert_eq!(AppError::BadRequest("x".into()).client_message(), "x");
     }
 }

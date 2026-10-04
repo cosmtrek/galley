@@ -34,8 +34,12 @@ cd server && cargo test && cargo build --release
 - **状态机集中在 `domain.rs`**：评论和轮次的状态流转、角色权限只在这里定义，并由穷举测试覆盖。新增动作或状态时同步更新 `comment_transition` / `round_transition` 和测试，前端按钮的可用条件要与之一致。
 - **角色边界**：agent 不能解决或重新打开评论，owner 不能冒充 agent 提交结果。
 - **分享页隐私**：`/s/<token>` 是服务端渲染的纯 HTML，无 JS，不含评论、修订痕迹、版本历史和 `data-block` / `data-cell` 属性，带 `noindex`、`no-referrer` 和 `script-src 'none'` 的 CSP（`http_tests.rs` 有断言）。不要往分享页加脚本或评论相关数据。
+- **附件**：上传文件按 sha256 存在 `<data>/assets/<report>/<sha256>`，写入后不再改动；版本渲染时把哈希写进 URL（`/a/<report>/<sha256>/<name>`），所以已发布的快照不会被同名重传改变。`/a/` 需要登录或 agent token；分享页把前缀改写为 `/s/<token>/a/`，只放行已发布版本 HTML 里引用的附件，撤销后返回 410。库里只存相对 `assets` 目录的路径。
 - **HTML 安全**：Markdown 渲染结果由 `src/doc/parse.rs` 里的 ammonia 清洗，工作台直接 `{@html}` 渲染，放宽白名单前要评估 XSS 风险。
 - **数据库迁移**：迁移按 `PRAGMA user_version` 顺序执行（`server/src/db.rs`）。已发布的迁移文件不改，新变更追加 `migrations/000N_*.sql` 并登记到 `MIGRATIONS`。
+- **轮次完成条件**：没有 `verify` 状态的评论，且「评论之外的改动」全部确认（`maybe_complete_round`）。`completed_at` 只在轮次进入 `done` 时写入。
+- **状态读取**：`load_round` 会把租约过期的 `processing` 显示为 `submitted`；任何状态变更都要从 `load_round_raw` 读取真实状态再走 `round_transition`。
+- **错误信息**：`AppError::Internal` 的细节只写日志，返回给客户端的是 `internal error`（`client_message`）。
 - **轮次结果原子性**：agent 提交的结果必须给每条待处理评论一条回复，否则整体拒绝；不要做部分应用。
 
 ## 代码风格

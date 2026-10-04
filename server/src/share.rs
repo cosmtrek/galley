@@ -32,7 +32,7 @@ fn with_headers(status: StatusCode, body: String) -> Response {
     h.insert("x-robots-tag", HeaderValue::from_static("noindex, nofollow"));
     h.insert(
         header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static("default-src 'self'; script-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"),
+        HeaderValue::from_static("default-src 'self'; img-src 'self' data:; script-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"),
     );
     h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
@@ -43,6 +43,24 @@ fn with_headers(status: StatusCode, body: String) -> Response {
 fn status_page(status: StatusCode, heading: &str, message: &str) -> Response {
     let body = StatusTpl { heading, message }.render().unwrap_or_else(|_| heading.to_string());
     with_headers(status, body)
+}
+
+/// An image of a published report. Revalidated on every use so revoking the link takes effect.
+pub async fn asset(State(s): State<Shared>, Path((token, rest)): Path<(String, String)>) -> Response {
+    let lookup = s.store().share_asset(&token, &rest);
+    let mut resp = match lookup {
+        Ok(ShareLookup::Found((mime, bytes))) => crate::asset_response(&mime, bytes, "private, no-cache"),
+        Ok(ShareLookup::Revoked) => StatusCode::GONE.into_response(),
+        Ok(ShareLookup::NotFound) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            eprintln!("share asset: {e}");
+            StatusCode::NOT_FOUND.into_response()
+        }
+    };
+    let h = resp.headers_mut();
+    h.insert("x-robots-tag", HeaderValue::from_static("noindex, nofollow"));
+    h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    resp
 }
 
 pub async fn page(State(s): State<Shared>, Path(token): Path<String>) -> Response {

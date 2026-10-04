@@ -11,6 +11,8 @@
   <div class="diff added"><ins>{change.new_text}</ins></div>
 {:else if change.op === "deleted"}
   <div class="diff deleted">{change.old_text}</div>
+{:else if change.kind === "diagram"}
+  <div class="muted small">{change.op === "moved" ? "图表位置移动" : "图表源码已修改"}，可在「历史」中查看前后版本。</div>
 {:else if tableEdit}
   <table class="cells">
     <thead><tr><th>单元格</th><th>修改前</th><th>修改后</th></tr></thead>

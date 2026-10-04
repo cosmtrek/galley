@@ -59,7 +59,9 @@ pub enum RoundStatus {
 pub enum RoundAction {
     Claim { lease_expired: bool },
     Result,
-    /// System: no comment of the round is waiting for verification any more.
+    /// Owner accepts edits that no comment of the round asked for.
+    ConfirmExtra,
+    /// System: no comment is waiting for verification and every extra change is confirmed.
     Complete,
 }
 
@@ -168,15 +170,22 @@ pub fn round_transition(
     let name = || match action {
         RoundAction::Claim { .. } => "claim".to_string(),
         RoundAction::Result => "submit a result for".to_string(),
+        RoundAction::ConfirmExtra => "confirm extra changes of".to_string(),
         RoundAction::Complete => "complete".to_string(),
     };
-    if matches!(action, RoundAction::Claim { .. } | RoundAction::Result) && role != Role::Agent {
+    let allowed_role = match action {
+        RoundAction::Claim { .. } | RoundAction::Result => Some(Role::Agent),
+        RoundAction::ConfirmExtra => Some(Role::Owner),
+        RoundAction::Complete => None,
+    };
+    if allowed_role.is_some_and(|r| r != role) {
         return Err(TransitionError::Forbidden { role, action: name(), from: from.as_str().into() });
     }
     match (from, action) {
         (R::Submitted, RoundAction::Claim { .. }) => Ok(R::Processing),
         (R::Processing, RoundAction::Claim { lease_expired: true }) => Ok(R::Processing),
         (R::Submitted | R::Processing, RoundAction::Result) => Ok(R::Verifying),
+        (R::Verifying, RoundAction::ConfirmExtra) => Ok(R::Verifying),
         (R::Verifying, RoundAction::Complete) => Ok(R::Done),
         _ => Err(TransitionError::Invalid { action: name(), from: from.as_str().into() }),
     }
@@ -188,8 +197,11 @@ mod tests {
     use CommentAction as A;
     use CommentStatus as S;
 
+    use RoundStatus as R;
+
+    const ALL_ROLES: [Role; 2] = [Role::Owner, Role::Agent];
     const ALL_STATUS: [S; 6] = [S::Draft, S::Open, S::Clarify, S::Verify, S::Resolved, S::Orphaned];
-    const ALL_ACTIONS: [A; 11] = [
+    const ALL_ACTIONS: [A; 10] = [
         A::Edit,
         A::Delete,
         A::Submit,
@@ -200,8 +212,77 @@ mod tests {
         A::Resolve,
         A::Reopen,
         A::Orphan,
-        A::Edit,
     ];
+    const ALL_ROUND_STATUS: [R; 4] = [R::Submitted, R::Processing, R::Verifying, R::Done];
+    const ALL_ROUND_ACTIONS: [RoundAction; 5] = [
+        RoundAction::Claim { lease_expired: false },
+        RoundAction::Claim { lease_expired: true },
+        RoundAction::Result,
+        RoundAction::ConfirmExtra,
+        RoundAction::Complete,
+    ];
+
+    /// No wildcard arms: a new variant breaks compilation here, as a reminder to add it to the
+    /// lists above so the transition tables below stay exhaustive.
+    #[allow(dead_code)]
+    fn listed(s: S, a: A, rs: R, ra: RoundAction) {
+        match s {
+            S::Draft | S::Open | S::Clarify | S::Verify | S::Resolved | S::Orphaned => {}
+        }
+        match a {
+            A::Edit
+            | A::Delete
+            | A::Submit
+            | A::OwnerMessage
+            | A::AgentChanged
+            | A::AgentAnswered
+            | A::AgentClarify
+            | A::Resolve
+            | A::Reopen
+            | A::Orphan => {}
+        }
+        match rs {
+            R::Submitted | R::Processing | R::Verifying | R::Done => {}
+        }
+        match ra {
+            RoundAction::Claim { .. } | RoundAction::Result | RoundAction::ConfirmExtra | RoundAction::Complete => {}
+        }
+    }
+
+    fn outcome(r: Result<String, TransitionError>) -> String {
+        match r {
+            Ok(next) => next,
+            Err(TransitionError::Forbidden { .. }) => "forbidden".into(),
+            Err(TransitionError::Invalid { .. }) => "invalid".into(),
+        }
+    }
+
+    /// The full comment transition table; any change to the rules shows up in the snapshot diff.
+    #[test]
+    fn comment_transition_table() {
+        let mut out = String::new();
+        for s in ALL_STATUS {
+            for a in ALL_ACTIONS {
+                for r in ALL_ROLES {
+                    out.push_str(&format!("{s:?} + {a:?} by {r:?} -> {}\n", outcome(comment_transition(s, a, r).map(|n| n.map_or("deleted".into(), |n| format!("{n:?}"))))));
+                }
+            }
+        }
+        insta::assert_snapshot!(out);
+    }
+
+    #[test]
+    fn round_transition_table() {
+        let mut out = String::new();
+        for s in ALL_ROUND_STATUS {
+            for a in ALL_ROUND_ACTIONS {
+                for r in ALL_ROLES {
+                    out.push_str(&format!("{s:?} + {a:?} by {r:?} -> {}\n", outcome(round_transition(s, a, r).map(|n| format!("{n:?}")))));
+                }
+            }
+        }
+        insta::assert_snapshot!(out);
+    }
 
     #[test]
     fn agent_can_never_resolve_or_reopen() {
@@ -264,19 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn every_pair_is_decided() {
-        for s in ALL_STATUS {
-            for a in ALL_ACTIONS {
-                for r in [Role::Owner, Role::Agent] {
-                    let _ = comment_transition(s, a, r);
-                }
-            }
-        }
-    }
-
-    #[test]
     fn round_transitions() {
-        use RoundStatus as R;
         assert_eq!(round_transition(R::Submitted, RoundAction::Claim { lease_expired: false }, Role::Agent), Ok(R::Processing));
         assert!(round_transition(R::Processing, RoundAction::Claim { lease_expired: false }, Role::Agent).is_err());
         assert_eq!(round_transition(R::Processing, RoundAction::Claim { lease_expired: true }, Role::Agent), Ok(R::Processing));
@@ -285,6 +354,9 @@ mod tests {
         assert!(round_transition(R::Verifying, RoundAction::Result, Role::Agent).is_err());
         assert!(round_transition(R::Submitted, RoundAction::Claim { lease_expired: false }, Role::Owner).is_err());
         assert!(round_transition(R::Processing, RoundAction::Result, Role::Owner).is_err());
+        assert_eq!(round_transition(R::Verifying, RoundAction::ConfirmExtra, Role::Owner), Ok(R::Verifying));
+        assert!(round_transition(R::Verifying, RoundAction::ConfirmExtra, Role::Agent).is_err());
+        assert!(round_transition(R::Done, RoundAction::ConfirmExtra, Role::Owner).is_err());
         assert_eq!(round_transition(R::Verifying, RoundAction::Complete, Role::Owner), Ok(R::Done));
         assert!(round_transition(R::Done, RoundAction::Complete, Role::Owner).is_err());
     }

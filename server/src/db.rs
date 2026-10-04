@@ -5,6 +5,9 @@ use rusqlite::Connection;
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_init.sql"),
     include_str!("../migrations/0002_drop_comment_kind_scope.sql"),
+    include_str!("../migrations/0003_indexes.sql"),
+    include_str!("../migrations/0004_asset_blobs.sql"),
+    include_str!("../migrations/0005_round_completed_at.sql"),
 ];
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
@@ -43,12 +46,20 @@ mod tests {
         conn.execute_batch(
             "INSERT INTO reports (id, title, created_at, updated_at) VALUES ('r', 't', 0, 0);
              INSERT INTO comments (id, report_id, kind, scope, status, body, created_version_id, created_at, updated_at)
-             VALUES ('c', 'r', 'verify', 'global', 'draft', '全文核实', 'v', 0, 0);",
+             VALUES ('c', 'r', 'verify', 'global', 'draft', '全文核实', 'v', 0, 0);
+             INSERT INTO rounds (id, report_id, seq, status, base_version_id, submitted_at, completed_at)
+             VALUES ('rd', 'r', 1, 'verifying', 'v', 0, 5);
+             INSERT INTO assets (id, report_id, name, sha256, mime, path, created_at)
+             VALUES ('a', 'r', 'fig.png', 'abc', 'image/png', './data/assets/r/fig.png', 0);",
         )
         .unwrap();
         let conn = init(conn).unwrap();
         let body: String = conn.query_row("SELECT body FROM comments WHERE id = 'c'", [], |r| r.get(0)).unwrap();
         assert_eq!(body, "全文核实");
+        let blob: String = conn.query_row("SELECT mime FROM asset_blobs WHERE sha256 = 'abc'", [], |r| r.get(0)).unwrap();
+        assert_eq!(blob, "image/png");
+        let completed: Option<i64> = conn.query_row("SELECT completed_at FROM rounds", [], |r| r.get(0)).unwrap();
+        assert_eq!(completed, None);
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
         assert_eq!(version, MIGRATIONS.len() as i64);
     }

@@ -19,6 +19,8 @@ pub enum BlockKind {
     Table,
     Code,
     Chart,
+    /// Mermaid or SVG rendered to an image; `sig` carries the source.
+    Diagram,
     Image,
     Quote,
     Rule,

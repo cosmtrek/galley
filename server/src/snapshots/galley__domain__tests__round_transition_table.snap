@@ -1,0 +1,44 @@
+---
+source: src/domain.rs
+expression: out
+---
+Submitted + Claim { lease_expired: false } by Owner -> forbidden
+Submitted + Claim { lease_expired: false } by Agent -> Processing
+Submitted + Claim { lease_expired: true } by Owner -> forbidden
+Submitted + Claim { lease_expired: true } by Agent -> Processing
+Submitted + Result by Owner -> forbidden
+Submitted + Result by Agent -> Verifying
+Submitted + ConfirmExtra by Owner -> invalid
+Submitted + ConfirmExtra by Agent -> forbidden
+Submitted + Complete by Owner -> invalid
+Submitted + Complete by Agent -> invalid
+Processing + Claim { lease_expired: false } by Owner -> forbidden
+Processing + Claim { lease_expired: false } by Agent -> invalid
+Processing + Claim { lease_expired: true } by Owner -> forbidden
+Processing + Claim { lease_expired: true } by Agent -> Processing
+Processing + Result by Owner -> forbidden
+Processing + Result by Agent -> Verifying
+Processing + ConfirmExtra by Owner -> invalid
+Processing + ConfirmExtra by Agent -> forbidden
+Processing + Complete by Owner -> invalid
+Processing + Complete by Agent -> invalid
+Verifying + Claim { lease_expired: false } by Owner -> forbidden
+Verifying + Claim { lease_expired: false } by Agent -> invalid
+Verifying + Claim { lease_expired: true } by Owner -> forbidden
+Verifying + Claim { lease_expired: true } by Agent -> invalid
+Verifying + Result by Owner -> forbidden
+Verifying + Result by Agent -> invalid
+Verifying + ConfirmExtra by Owner -> Verifying
+Verifying + ConfirmExtra by Agent -> forbidden
+Verifying + Complete by Owner -> Done
+Verifying + Complete by Agent -> Done
+Done + Claim { lease_expired: false } by Owner -> forbidden
+Done + Claim { lease_expired: false } by Agent -> invalid
+Done + Claim { lease_expired: true } by Owner -> forbidden
+Done + Claim { lease_expired: true } by Agent -> invalid
+Done + Result by Owner -> forbidden
+Done + Result by Agent -> invalid
+Done + ConfirmExtra by Owner -> invalid
+Done + ConfirmExtra by Agent -> forbidden
+Done + Complete by Owner -> invalid
+Done + Complete by Agent -> invalid

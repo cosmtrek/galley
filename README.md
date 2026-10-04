@@ -36,11 +36,20 @@ To try it quickly, import `examples/energy-storage-2026.md` with the "导入 Mar
 1. **Annotate (批注).** Switch the workbench between reading mode and comment mode with the "阅读 | 评论" toggle or the `M` key. In comment mode, select text and a comment box opens right below the pointer; use the "＋" in the left margin to comment on a whole block, or the outline to comment on a section or the whole report. A comment is one free-form sentence. Say what you want and, if it applies beyond this spot, say so ("全文类似的说法都改掉"). Enter saves, Shift+Enter adds a line. The right sidebar lists comments by status and supports batch resolve and batch delete of drafts.
 2. **Submit the round (提交本轮).** Drafts become visible to the agent. You can keep writing drafts for the next round while the agent works.
 3. **Agent revises.** The agent claims the round, reads the packet (comments with surrounding context, plus constraints from resolved comments), and submits the full new Markdown, one reply per comment, and a summary. A reply's action is `changed`, `answered`, or `clarify`.
-4. **Verify (验证).** For each comment you see your comment, the agent's reply, and a word-level diff of the affected block. You can resolve it, reopen it with a reason, or answer a clarify question. Edits that no comment asked for are listed separately under "评论之外的改动" and need confirmation. Anything reopened or answered goes into the next round.
+4. **Verify (验证).** For each comment you see your comment, the agent's reply, and a word-level diff of the affected block. You can resolve it, reopen it with a reason, or answer a clarify question. Edits that no comment asked for are listed separately under "评论之外的改动" and need confirmation: the round is done only when no comment is waiting for verification and every such edit is confirmed. Anything reopened or answered goes into the next round.
 5. **History (历史).** Compare any two versions, or roll back. A rollback creates a new version.
-6. **Publish (发布).** Publishing takes a snapshot of the current version and gives it an unguessable link (`/s/<token>`). The share page has no JavaScript and contains no comments, revision marks, or version history. It is served with `noindex` and `no-referrer` headers and a strict CSP. Republishing updates the same link. Revoking a link makes it return 410 permanently.
+6. **Publish (发布).** Publishing takes a snapshot of the current version and gives it an unguessable link (`/s/<token>`). The snapshot includes its images: uploads are stored by content hash, so re-uploading a file under the same name changes later versions only. The share page serves images through its own link (`/s/<token>/a/...`), only those the published version uses, and never exposes the report id. The share page has no JavaScript and contains no comments, revision marks, or version history. It is served with `noindex` and `no-referrer` headers and a strict CSP. Republishing updates the same link. Revoking a link makes it return 410 permanently.
 
-Comments follow the text across versions. Galley aligns the blocks of each new version with the previous one, so blocks keep their ids through edits, moves, and renumbered headings, and text anchors are relocated by quote and context. If an anchor's text disappears, the comment is marked orphaned instead of being silently dropped.
+Comments follow the text across versions. Galley aligns the blocks of each new version with the previous one, so blocks keep their ids through edits, moves, and renumbered headings, and text anchors are relocated by quote and context. If an anchor's text disappears, the comment is marked orphaned instead of being silently dropped. A selection may cross paragraphs; if only one end of it survives a revision, the comment narrows to that paragraph.
+
+### Diagrams
+
+Reports can contain diagrams, rendered on the server so they also show on the script-free share page:
+
+- A ` ```mermaid ` code block (flowchart, sequence, state, class, ER, gantt, pie, and more) is rendered to SVG. If it fails to parse, it stays a plain code block.
+- A ` ```svg ` code block, or a raw `<svg>…</svg>` element in the Markdown, is shown as is. Raw `<svg>` must not contain blank lines (Markdown ends an HTML block at a blank line); use the fenced form for long SVG.
+
+Diagrams are embedded as `<img>` data URIs, so SVG scripts and external resources never run. You comment on a diagram as a whole block with the "＋" in the margin.
 
 ## Connecting an AI agent
 
@@ -95,7 +104,7 @@ Other agent endpoints:
 
 - `POST /api/reports` with `{"markdown": "..."}` creates a report.
 - `POST /api/reports/<id>/versions` with `{"markdown": "...", "note": "..."}` pushes a version.
-- `POST /api/reports/<id>/assets?name=fig1.png` with the raw file as the body uploads an image, which the report references as `![](assets/fig1.png)`.
+- `POST /api/reports/<id>/assets?name=fig1.png` with the raw file as the body uploads an image, which the report references as `![](assets/fig1.png)`. Upload images before pushing the version that uses them: a version is rendered with the uploads that exist at that moment, and keeps them. Asset URLs under `/a/` require the owner session or the agent token.
 
 Every pending comment must get a reply, or the result is rejected. Results are applied atomically.
 

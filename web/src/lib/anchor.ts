@@ -92,41 +92,80 @@ function utf16OffsetIn(scope: Node, node: Node, offset: number): number {
   return r.toString().length;
 }
 
-function blockOf(node: Node | null): HTMLElement | null {
-  const el = node instanceof Element ? node : node?.parentElement;
-  return (el?.closest("[data-block]") as HTMLElement | null) ?? null;
-}
-
 function cellOf(node: Node | null): HTMLElement | null {
   const el = node instanceof Element ? node : node?.parentElement;
   return (el?.closest("[data-cell]") as HTMLElement | null) ?? null;
 }
 
-/** Converts the current selection into a text anchor, or null if it spans blocks or is empty. */
+type Piece = { block: HTMLElement; text: string; s: number; e: number };
+
+/** The part of each block the range covers, as UTF-16 offsets into the block text. */
+export function rangePieces(range: Range, root: HTMLElement): Piece[] {
+  const pieces: Piece[] = [];
+  for (const block of root.querySelectorAll<HTMLElement>("[data-block]")) {
+    if (!range.intersectsNode(block)) continue;
+    const text = block.textContent ?? "";
+    const s = block.contains(range.startContainer) ? utf16OffsetIn(block, range.startContainer, range.startOffset) : 0;
+    const e = block.contains(range.endContainer)
+      ? utf16OffsetIn(block, range.endContainer, range.endOffset)
+      : text.length;
+    pieces.push({ block, text, s, e });
+  }
+  // A selection that ends at the very start of the next block (triple click, dragging past
+  // a paragraph end) or starts at the end of a block covers no visible text there.
+  const blank = (p: Piece) => p.text.slice(p.s, p.e).trim() === "";
+  while (pieces.length && blank(pieces[0])) pieces.shift();
+  while (pieces.length && blank(pieces[pieces.length - 1])) pieces.pop();
+  return pieces;
+}
+
+/** Converts the current selection into a text anchor, or null if it covers no text. */
 export function selectionToAnchor(sel: Selection | null, root: HTMLElement): TextAnchor | null {
   if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
   const range = sel.getRangeAt(0);
-  if (!root.contains(range.commonAncestorContainer)) return null;
-  const block = blockOf(range.startContainer);
-  if (!block || block !== blockOf(range.endContainer)) return null;
+  const pieces = rangePieces(range, root);
+  if (!pieces.length) return null;
 
-  const startCell = cellOf(range.startContainer);
-  const endCell = cellOf(range.endContainer);
-  const cellEl = startCell && startCell === endCell && block.contains(startCell) ? startCell : null;
-  const scope = cellEl ?? block;
-  const text = scope.textContent ?? "";
+  if (pieces.length === 1) {
+    const { block } = pieces[0];
+    const inside = block.contains(range.startContainer) && block.contains(range.endContainer);
+    const startCell = inside ? cellOf(range.startContainer) : null;
+    const cellEl = startCell && startCell === cellOf(range.endContainer) && block.contains(startCell) ? startCell : null;
+    const scope = cellEl ?? block;
+    const text = scope.textContent ?? "";
+    let [s, e] = cellEl
+      ? [
+          utf16OffsetIn(scope, range.startContainer, range.startOffset),
+          utf16OffsetIn(scope, range.endContainer, range.endOffset),
+        ]
+      : [pieces[0].s, pieces[0].e];
+    [s, e] = trimRange(text, s, e);
+    if (s >= e) return null;
+    const start = utf16ToCp(text, s);
+    const end = utf16ToCp(text, e);
+    const cell = cellEl ? (cellEl.dataset.cell!.split(",").map(Number) as [number, number]) : null;
+    return { type: "text", block_id: block.dataset.block!, cell, start, end, ...contextOf(text, start, end) };
+  }
 
-  let s = utf16OffsetIn(scope, range.startContainer, range.startOffset);
-  let e = utf16OffsetIn(scope, range.endContainer, range.endOffset);
-  [s, e] = trimRange(text, s, e);
-  if (s >= e) return null;
-
-  const start = utf16ToCp(text, s);
-  const end = utf16ToCp(text, e);
-  const cell = cellEl
-    ? (cellEl.dataset.cell!.split(",").map(Number) as [number, number])
-    : null;
-  return { type: "text", block_id: block.dataset.block!, cell, start, end, ...contextOf(text, start, end) };
+  const first = pieces[0];
+  const last = pieces[pieces.length - 1];
+  const [s] = trimRange(first.text, first.s, first.text.length);
+  const [, e] = trimRange(last.text, 0, last.e);
+  const start = utf16ToCp(first.text, s);
+  const end = utf16ToCp(last.text, e);
+  // Must match the server's join of whole block texts in between (anchor.rs `span_context`).
+  const quote = [first.text.slice(s), ...pieces.slice(1, -1).map((p) => p.text), last.text.slice(0, e)].join("\n");
+  return {
+    type: "text",
+    block_id: first.block.dataset.block!,
+    cell: null,
+    start,
+    end_block_id: last.block.dataset.block!,
+    end,
+    quote,
+    prefix: contextOf(first.text, start, start).prefix,
+    suffix: contextOf(last.text, end, end).suffix,
+  };
 }
 
 function pointAt(scope: Node, u16: number): [Node, number] {
@@ -154,6 +193,17 @@ export function scopeFor(root: HTMLElement, a: Anchor): HTMLElement | null {
 /** Builds a DOM range for a text anchor (falls back to searching the quote). */
 export function anchorToRange(root: HTMLElement, a: Anchor): Range | null {
   if (a.type !== "text") return null;
+  if (a.end_block_id) {
+    const first = scopeFor(root, { type: "block", block_id: a.block_id });
+    const last = scopeFor(root, { type: "block", block_id: a.end_block_id });
+    if (!first || !last || !(first.compareDocumentPosition(last) & Node.DOCUMENT_POSITION_FOLLOWING)) return null;
+    const r = document.createRange();
+    const [sn, so] = pointAt(first, cpToUtf16(first.textContent ?? "", a.start));
+    const [en, eo] = pointAt(last, cpToUtf16(last.textContent ?? "", a.end));
+    r.setStart(sn, so);
+    r.setEnd(en, eo);
+    return r;
+  }
   const scope = scopeFor(root, a);
   if (!scope) return null;
   const text = scope.textContent ?? "";
