@@ -141,10 +141,10 @@ textarea:focus, input:focus, select:focus { outline: 1px solid var(--fg); outlin
 .report-row { position: relative; padding: 14px 0; color: inherit; }
 .report-main { min-width: 0; display: grid; gap: 6px; }
 .report-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px 16px; }
-.report-title { font-weight: 600; font-size: 16px; color: inherit; text-decoration: none; }
-.report-title::after { content: ""; position: absolute; inset: 0; }
-.report-title:hover, .report-row:hover .report-title { color: var(--accent); }
-.report-title:focus-visible { outline: 1px solid var(--fg); outline-offset: 2px; }
+.report-row .report-title { font-weight: 600; font-size: 16px; color: inherit; text-decoration: none; }
+.report-row .report-title::after { content: ""; position: absolute; inset: 0; }
+.report-row .report-title:hover, .report-row:hover .report-title { color: var(--accent); }
+.report-row .report-title:focus-visible { outline: 1px solid var(--fg); outline-offset: 2px; }
 .report-main .clamp { line-height: 1.6; }
 .report-meta { font-size: 12px; }
 .report-meta .stale { color: var(--warn); }
