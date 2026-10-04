@@ -84,9 +84,11 @@ export function fmtAgo(ms: number): string {
   return fmtTime(ms);
 }
 
+/** Display-only: selections often carry stray edge whitespace, which reads badly inside 「」. */
 export function truncate(s: string, n = 60): string {
-  const chars = Array.from(s);
-  return chars.length > n ? chars.slice(0, n).join("") + "…" : s;
+  const t = s.trim();
+  const chars = Array.from(t);
+  return chars.length > n ? chars.slice(0, n).join("") + "…" : t;
 }
 
 /** Document-order sort key for a comment against the current version's blocks. */
