@@ -84,30 +84,16 @@
   role="button"
   tabindex="0"
 >
-  <div class="card-loc">
-    {#if pickable}
-      <input
-        type="checkbox"
-        class="pick"
-        checked={picked}
-        aria-label="选择这条评论"
-        onclick={stop}
-        onchange={(e) => onpick?.((e.currentTarget as HTMLInputElement).checked)}
-      />
-    {/if}
-    {#if comment.anchor.type === "text"}
-      <span class="loc-text">{sectionTitle ? sectionTitle + " · " : ""}“{truncate(comment.anchor.quote, 120)}”</span>
-    {:else}
-      <span class="loc-text">{anchorLabel(comment.anchor, sectionTitle, block?.kind)}{#if quote}：{truncate(quote, 80)}{/if}</span>
-    {/if}
-    <span class="spacer"></span>
-    <span class="card-id mono">{comment.id}</span>
-  </div>
-  {#if changedQuote && block?.kind !== "table"}<div class="muted small">原文：{truncate(changedQuote, 80)}</div>{/if}
-  {#if comment.anchor_state === "orphaned" && comment.status !== "resolved"}
-    <div class="warn-note">锚定的内容已不在当前版本中</div>
-  {:else if comment.anchor_state === "fuzzy" && comment.status !== "resolved"}
-    <div class="warn-note">原文已改动，位置为近似匹配</div>
+  <span class="sr-only">{STATUS_LABEL[comment.status]}</span>
+  {#if pickable}
+    <input
+      type="checkbox"
+      class="pick"
+      checked={picked}
+      aria-label="选择这条评论"
+      onclick={stop}
+      onchange={(e) => onpick?.((e.currentTarget as HTMLInputElement).checked)}
+    />
   {/if}
 
   {#if editing}
@@ -123,36 +109,53 @@
       />
     </div>
   {:else}
-    <div class="body">{comment.body}</div>
+    <div class="body" title={fmtTime(comment.created_at)}>{comment.body}</div>
+  {/if}
+
+  <div class="card-loc">
+    {#if comment.anchor.type === "text"}
+      <span class="loc-text">{sectionTitle ? sectionTitle + " · " : ""}「{truncate(comment.anchor.quote, 120)}」</span>
+    {:else}
+      <span class="loc-text">{anchorLabel(comment.anchor, sectionTitle, block?.kind)}{#if quote} ·「{truncate(quote, 80)}」{/if}</span>
+    {/if}
+    {#if !editing}
+      <span class="loc-actions" onclick={stop} onkeydown={stop} role="presentation">
+        {#if comment.status === "draft"}
+          <button class="link" onclick={() => (editing = true)}>编辑</button>
+          <button class="link" onclick={remove}>删除</button>
+        {:else if comment.status === "open"}
+          <button class="link" onclick={() => (replying = replying === "message" ? "" : "message")}>补充说明</button>
+        {:else if comment.status === "resolved"}
+          <button class="link" disabled={busy} onclick={() => (replying = replying === "reopen" ? "" : "reopen")}>重新打开</button>
+        {/if}
+      </span>
+    {/if}
+    <span class="card-id mono">{comment.id}</span>
+  </div>
+  {#if changedQuote && block?.kind !== "table"}<div class="muted small">原文：{truncate(changedQuote, 80)}</div>{/if}
+  {#if comment.anchor_state === "orphaned" && comment.status !== "resolved"}
+    <div class="warn-note">锚定的内容已不在当前版本中</div>
+  {:else if comment.anchor_state === "fuzzy" && comment.status !== "resolved"}
+    <div class="warn-note">原文已改动，位置为近似匹配</div>
   {/if}
 
   <Thread messages={comment.messages} />
 
   {#if !editing}
-    <div class="card-foot">
-      <span class="card-status">{STATUS_LABEL[comment.status]}</span>
-      <span class="muted small">· {fmtTime(comment.created_at)}</span>
-      <span class="spacer"></span>
-      <div class="actions" onclick={stop} onkeydown={stop} role="presentation">
-        {#if comment.status === "draft"}
-          <button class="link" onclick={() => (editing = true)}>编辑</button>
-          <button class="link" onclick={remove}>删除</button>
-        {:else if comment.status === "verify"}
+    {#if comment.status === "verify" || comment.status === "clarify" || comment.status === "orphaned"}
+      <div class="card-foot actions" onclick={stop} onkeydown={stop} role="presentation">
+        {#if comment.status === "verify"}
           <button class="primary" disabled={busy} onclick={resolve}>解决</button>
           <button disabled={busy} onclick={() => (replying = replying === "reopen" ? "" : "reopen")}>重新打开</button>
         {:else if comment.status === "clarify"}
           <button class="primary" onclick={() => (replying = replying === "message" ? "" : "message")}>回复</button>
           <button disabled={busy} onclick={resolve}>直接解决</button>
-        {:else if comment.status === "open"}
-          <button class="link" onclick={() => (replying = replying === "message" ? "" : "message")}>补充说明</button>
-        {:else if comment.status === "orphaned"}
+        {:else}
           <button class="primary" disabled={busy} onclick={resolve}>解决</button>
           <button disabled={busy} onclick={() => (replying = replying === "reopen" ? "" : "reopen")}>重新打开</button>
-        {:else if comment.status === "resolved"}
-          <button class="link" disabled={busy} onclick={() => (replying = replying === "reopen" ? "" : "reopen")}>重新打开</button>
         {/if}
       </div>
-    </div>
+    {/if}
     {#if replying}
       <div class="reply-box" onclick={stop} onkeydown={stop} role="presentation">
         <textarea bind:value={text} placeholder={replying === "reopen" ? "为什么重新打开（可选）" : "回复 AI"}></textarea>
