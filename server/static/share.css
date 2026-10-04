@@ -14,8 +14,13 @@ body { color: #222; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC
 .share-meta { color: #6b6b6b; font-size: 0.9rem; margin: 0; }
 
 .toc { position: sticky; top: 2rem; align-self: start; max-height: calc(100vh - 4rem); overflow-y: auto; font-size: 0.9rem; line-height: 1.5; }
-.toc summary { font-weight: 600; cursor: pointer; margin-bottom: 0.5rem; list-style: none; }
+.toc-title { font-weight: 600; margin-bottom: 0.5rem; }
+.toc-inline { display: none; }
+.toc summary { font-weight: 600; cursor: pointer; list-style: none; }
 .toc summary::-webkit-details-marker { display: none; }
+.toc summary::after { content: " ▸"; color: #6b6b6b; }
+.toc details[open] summary { margin-bottom: 0.5rem; }
+.toc details[open] summary::after { content: " ▾"; }
 .toc ul { list-style: none; margin: 0; padding: 0; border-left: 1px solid #e2e2e2; }
 .toc li { margin: 0; }
 .toc a { display: block; color: #444; text-decoration: none; padding: 0.2rem 0 0.2rem 0.8rem; }
@@ -28,6 +33,6 @@ body { color: #222; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC
 
 @media (max-width: 860px) {
   .share { display: block; padding: 1.25rem 1rem 4rem; }
-  .toc { position: static; max-height: none; margin-bottom: 1.5rem; border-bottom: 1px solid #e2e2e2; padding-bottom: 0.75rem; }
-  .toc details:not([open]) { margin-bottom: 0; }
+  .toc-side { display: none; }
+  .toc-inline { display: block; position: static; max-height: none; margin-bottom: 1.5rem; border-bottom: 1px solid #e2e2e2; padding-bottom: 0.75rem; }
 }

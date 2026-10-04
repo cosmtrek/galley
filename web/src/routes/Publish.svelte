@@ -1,9 +1,11 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { get, post } from "../lib/api";
+  import { del, get, post } from "../lib/api";
+  import { navigate } from "../lib/router.svelte";
   import { fmtTime } from "../lib/format";
   import type { Publication, ReportInfo } from "../lib/types";
   import TopBar from "../components/TopBar.svelte";
+  import { copyText } from "../lib/clipboard";
 
   let { id }: { id: string } = $props();
 
@@ -11,7 +13,7 @@
   let pubs = $state<Publication[]>([]);
   let publicUrl = $state(location.origin);
   let error = $state("");
-  let copied = $state(false);
+  let copied = $state<"" | "ok" | "fail">("");
   let busy = $state(false);
 
   async function load() {
@@ -52,9 +54,42 @@
   }
 
   async function copy() {
-    await navigator.clipboard.writeText(link);
-    copied = true;
-    setTimeout(() => (copied = false), 1500);
+    copied = (await copyText(link)) ? "ok" : "fail";
+    setTimeout(() => (copied = ""), 2000);
+  }
+
+  // ----- report management -----
+
+  const stale = $derived(!!active && !!report && active.version_id !== report.current_version_id);
+
+  async function manage(action: () => Promise<unknown>) {
+    busy = true;
+    try {
+      await action();
+      await load();
+    } catch (e) {
+      alert((e as Error).message);
+    } finally {
+      busy = false;
+    }
+  }
+  function archive() {
+    const ar = report?.active_round;
+    const inflight = ar && ar.status !== "verifying" ? `第 ${ar.seq} 轮正在等 AI，归档后它交回的结果会作废，恢复后需要让 AI 重做。\n\n` : "";
+    if (!confirm(`${inflight}归档后报告变为只读，从列表移到「已归档」，随时可以恢复。分享链接继续有效。`)) return;
+    manage(() => post(`/api/reports/${id}/archive`));
+  }
+  const unarchive = () => manage(() => post(`/api/reports/${id}/unarchive`));
+  async function remove() {
+    if (!report) return;
+    const warn = active ? `分享链接会立刻失效（已打开 ${active.views} 次）。` : "";
+    const typed = prompt(`永久删除会清掉所有版本、评论和轮次记录，无法恢复。${warn}\n\n输入报告标题「${report.title}」确认：`);
+    if (typed === null) return;
+    if (typed.trim() !== report.title.trim()) return alert("标题不一致，没有删除。");
+    await manage(async () => {
+      await del(`/api/reports/${id}`);
+      navigate("/app");
+    });
   }
 </script>
 
@@ -64,6 +99,14 @@
 <div class="page">
   <h1>发布</h1>
   {#if report}
+    {#if report.archived_at}
+      <div class="banner" style="margin-bottom: 16px">已归档，只读。要继续修改，请在下方「报告管理」里恢复。</div>
+    {/if}
+    {#if stale && active}
+      <div class="banner attention" style="margin-bottom: 16px">
+        读者现在看到的还是 v{active.version_seq}，当前已经是 v{report.current_seq}。确认无误后更新分享页。
+      </div>
+    {/if}
     {#if pendingCount > 0}
       <div class="banner attention" style="margin-bottom: 16px">
         还有 {pendingCount} 条评论未解决或待验证（草稿 {report.counts.draft} 条不计）。可以照常发布，读者看不到任何评论。
@@ -73,11 +116,12 @@
     {#if active}
       <div class="panel">
         <h3>分享链接</h3>
-        <div class="row">
+        <div class="row share-link">
           <input type="text" readonly value={link} onfocus={(e) => (e.target as HTMLInputElement).select()} />
-          <button onclick={copy}>{copied ? "已复制" : "复制"}</button>
+          <button onclick={copy}>{copied === "ok" ? "已复制" : "复制"}</button>
           <a href={active.path} target="_blank" rel="noopener">打开</a>
         </div>
+        {#if copied === "fail"}<p class="small muted">无法自动复制，请点输入框后手动复制。</p>{/if}
         <p class="small muted" style="margin-top: 12px">
           已发布 v{active.version_seq} · 更新于 {fmtTime(active.updated_at)} · 打开 {active.views} 次 · 最近访问 {fmtTime(active.last_viewed_at)}
         </p>
@@ -117,5 +161,38 @@
         </tbody>
       </table>
     {/if}
+
+    <h2>报告管理</h2>
+    <div class="panel manage">
+      {#if report.archived_at}
+        <div class="row">
+          <div>
+            <b>已归档</b>
+            <div class="muted small">归档于 {fmtTime(report.archived_at)}。恢复后可以继续评论和提交。</div>
+          </div>
+          <span class="spacer"></span>
+          <button class="primary" disabled={busy} onclick={unarchive}>恢复</button>
+        </div>
+        <div class="row danger">
+          <div>
+            <b>永久删除</b>
+            <div class="muted small">删除所有版本、评论、轮次和分享记录，不可恢复。</div>
+          </div>
+          <span class="spacer"></span>
+          <button disabled={busy} onclick={remove}>永久删除</button>
+        </div>
+      {:else}
+        <div class="row">
+          <div>
+            <b>归档</b>
+            <div class="muted small">
+              从列表移到「已归档」，变为只读；AI 之后交回的结果会被拒绝。分享链接继续有效。删除需要先归档。
+            </div>
+          </div>
+          <span class="spacer"></span>
+          <button disabled={busy} onclick={archive}>归档</button>
+        </div>
+      {/if}
+    </div>
   {/if}
 </div>

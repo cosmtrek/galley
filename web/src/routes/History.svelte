@@ -5,6 +5,7 @@
   import type { Comparison, ReportInfo, VersionMeta } from "../lib/types";
   import TopBar from "../components/TopBar.svelte";
   import ChangeView from "../components/ChangeView.svelte";
+  import { diffCtx, withoutPartners, type DiffCtx } from "../lib/diffctx";
 
   let { id }: { id: string } = $props();
 
@@ -13,6 +14,7 @@
   let from = $state<string | null>(null);
   let to = $state<string | null>(null);
   let cmp = $state<Comparison | null>(null);
+  let ctx = $state<DiffCtx | null>(null);
   let error = $state("");
 
   async function load() {
@@ -29,7 +31,9 @@
 
   async function compare() {
     if (!from || !to) return;
-    cmp = await get<Comparison>(`/api/reports/${id}/compare?from=${from}&to=${to}`);
+    const c = await get<Comparison>(`/api/reports/${id}/compare?from=${from}&to=${to}`);
+    ctx = await diffCtx(c.from.id, c.to.id, c.changes).catch(() => null);
+    cmp = c;
   }
 
   async function rollback(v: VersionMeta) {
@@ -59,6 +63,9 @@
   <div class="history">
     <div>
       <h1 style="font-size: 18px">版本</h1>
+      {#if report?.active_round}
+        <p class="muted small">第 {report.active_round.seq} 轮还没结束，结束后才能回退版本。</p>
+      {/if}
       <ul class="vlist">
         {#each versions as v (v.id)}
           <li class:sel={v.id === from || v.id === to}>
@@ -74,7 +81,12 @@
               <label><input type="radio" name="to" checked={v.id === to} onchange={() => pick("to", v.id)} /> 新</label>
               <span class="spacer"></span>
               {#if v.id !== report?.current_version_id}
-                <button class="link small" onclick={() => rollback(v)}>回退到此版本</button>
+                {@const busy = report?.active_round}
+                <button
+                  class="link small"
+                  disabled={!!busy}
+                  title={busy ? `第 ${busy.seq} 轮结束后才能回退` : ""}
+                  onclick={() => rollback(v)}>回退到此版本</button>
               {/if}
             </div>
           </li>
@@ -87,10 +99,10 @@
         {#if cmp.changes.length === 0}
           <p class="muted">两个版本内容相同。</p>
         {/if}
-        {#each cmp.changes as ch (ch.op + ch.block_id)}
+        {#each withoutPartners(ctx, cmp.changes) as ch (ch.op + ch.block_id)}
           <div class="vitem">
             <div class="vhead"><span>{cmp.section_titles[ch.section_id] ?? "开头"}</span></div>
-            <div class="vbody"><ChangeView change={ch} /></div>
+            <div class="vbody"><ChangeView change={ch} {ctx} /></div>
           </div>
         {/each}
       {/if}

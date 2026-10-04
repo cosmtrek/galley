@@ -1,7 +1,7 @@
 <script lang="ts">
   import { api, post } from "../lib/api";
-  import { anchorLabel, STATUS_LABEL, truncate } from "../lib/format";
-  import type { Comment } from "../lib/types";
+  import { anchorLabel, blockSummary, STATUS_LABEL, truncate } from "../lib/format";
+  import type { Block, Comment } from "../lib/types";
   import Composer from "./Composer.svelte";
   import Thread from "./Thread.svelte";
 
@@ -9,6 +9,7 @@
     comment,
     active = false,
     sectionTitle = null,
+    block = null,
     inline = false,
     pickable = false,
     picked = false,
@@ -19,6 +20,8 @@
     comment: Comment;
     active?: boolean;
     sectionTitle?: string | null;
+    /** Current block of a block/cell anchor, used for a kind-specific label. */
+    block?: Block | null;
     inline?: boolean;
     pickable?: boolean;
     picked?: boolean;
@@ -34,7 +37,11 @@
   let error = $state("");
 
   const quote = $derived(
-    comment.anchor.type === "text" ? comment.anchor.quote : comment.original_quote,
+    comment.anchor.type === "text"
+      ? comment.anchor.quote
+      : block && comment.anchor.type === "block"
+        ? blockSummary(block)
+        : comment.original_quote,
   );
   const changedQuote = $derived(
     comment.original_quote && quote && comment.original_quote !== quote ? comment.original_quote : null,
@@ -90,15 +97,15 @@
     {/if}
     <span class="badge s-{comment.status}">{STATUS_LABEL[comment.status]}</span>
     <span class="spacer"></span>
-    <span class="mono">{comment.id}</span>
+    <span class="card-id mono">{comment.id}</span>
   </div>
 
   {#if comment.anchor.type === "text"}
     <div class="quote">{truncate(comment.anchor.quote, 120)}</div>
   {:else}
-    <div class="quote">{anchorLabel(comment.anchor, sectionTitle)}{#if quote}：{truncate(quote, 80)}{/if}</div>
+    <div class="quote">{anchorLabel(comment.anchor, sectionTitle, block?.kind)}{#if quote}：{truncate(quote, 80)}{/if}</div>
   {/if}
-  {#if changedQuote}<div class="muted small">原文：{truncate(changedQuote, 80)}</div>{/if}
+  {#if changedQuote && block?.kind !== "table"}<div class="muted small">原文：{truncate(changedQuote, 80)}</div>{/if}
   {#if comment.anchor_state === "orphaned" && comment.status !== "resolved"}
     <div class="warn-note">锚定的内容已不在当前版本中</div>
   {:else if comment.anchor_state === "fuzzy" && comment.status !== "resolved"}

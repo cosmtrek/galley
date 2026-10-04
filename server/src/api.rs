@@ -64,6 +64,7 @@ impl FromRequestParts<Shared> for Auth {
         if let Some(h) = parts.headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) {
             if let Some(token) = h.strip_prefix("Bearer ") {
                 if !state.config.agent_token.is_empty() && constant_time_eq(token.trim(), &state.config.agent_token) {
+                    state.store().agent_seen()?;
                     return Ok(Auth(Role::Agent));
                 }
             }
@@ -84,7 +85,7 @@ impl FromRequestParts<Shared> for Owner {
     async fn from_request_parts(parts: &mut Parts, state: &Shared) -> Result<Self, Self::Rejection> {
         match Auth::from_request_parts(parts, state).await?.0 {
             Role::Owner => Ok(Owner),
-            Role::Agent => Err(AppError::Forbidden("this action is reserved for the owner".into())),
+            Role::Agent => Err(AppError::Forbidden("这个操作只能由报告所有者执行".into())),
         }
     }
 }
@@ -99,7 +100,9 @@ pub fn router() -> Router<Shared> {
         .route("/api/meta", get(meta))
         .route("/api/pending", get(pending))
         .route("/api/reports", get(list_reports).post(create_report))
-        .route("/api/reports/{id}", get(get_report))
+        .route("/api/reports/{id}", get(get_report).delete(delete_report))
+        .route("/api/reports/{id}/archive", post(archive_report))
+        .route("/api/reports/{id}/unarchive", post(unarchive_report))
         .route("/api/reports/{id}/source", get(get_source))
         .route("/api/reports/{id}/versions", get(list_versions).post(push_version))
         .route("/api/reports/{id}/assets", post(upload_asset))
@@ -121,6 +124,7 @@ pub fn router() -> Router<Shared> {
         .route("/api/rounds/{id}/result", post(submit_result))
         .route("/api/rounds/{id}/review", get(review))
         .route("/api/rounds/{id}/extra/confirm", post(confirm_extra))
+        .route("/api/rounds/{id}/extra/revert", post(revert_extra))
 }
 
 #[derive(Deserialize)]
@@ -157,8 +161,13 @@ async fn me(Auth(role): Auth) -> Json<Value> {
     Json(json!({ "role": role }))
 }
 
-async fn meta(State(s): State<Shared>, _: Owner) -> Json<Value> {
-    Json(json!({ "public_url": s.config.public_url }))
+async fn meta(State(s): State<Shared>, _: Owner) -> AppResult<Json<Value>> {
+    // Owner-only: the owner already holds every permission the agent has, and needs the token to connect one.
+    Ok(Json(json!({
+        "public_url": s.config.public_url,
+        "agent_token": s.config.agent_token,
+        "agent_last_seen": s.store().agent_last_seen()?,
+    })))
 }
 
 async fn pending(State(s): State<Shared>, _: Auth) -> AppResult<Json<Value>> {
@@ -194,6 +203,19 @@ async fn get_report(State(s): State<Shared>, _: Auth, Path(id): Path<String>) ->
     Ok(Json(json!({ "report": info, "version": v })))
 }
 
+async fn archive_report(State(s): State<Shared>, _: Owner, Path(id): Path<String>) -> AppResult<Json<Value>> {
+    Ok(Json(json!(s.store().archive(&id)?)))
+}
+
+async fn unarchive_report(State(s): State<Shared>, _: Owner, Path(id): Path<String>) -> AppResult<Json<Value>> {
+    Ok(Json(json!(s.store().unarchive(&id)?)))
+}
+
+async fn delete_report(State(s): State<Shared>, _: Owner, Path(id): Path<String>) -> AppResult<Json<Value>> {
+    s.store().delete_report(&id)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
 #[derive(Deserialize)]
 struct FormatQ {
     format: Option<String>,
@@ -215,11 +237,11 @@ async fn list_versions(State(s): State<Shared>, _: Auth, Path(id): Path<String>)
 
 async fn push_version(
     State(s): State<Shared>,
-    _: Auth,
+    Auth(role): Auth,
     Path(id): Path<String>,
     Json(req): Json<MarkdownReq>,
 ) -> AppResult<Json<Value>> {
-    let v = s.store().push_version(&id, &req.markdown, req.note.as_deref().unwrap_or("推送新版本"))?;
+    let v = s.store().push_version(&id, &req.markdown, req.note.as_deref().unwrap_or("推送新版本"), role)?;
     Ok(Json(json!({ "id": v.id, "seq": v.seq, "diff": v.diff })))
 }
 
@@ -293,7 +315,7 @@ async fn add_message(
 
 async fn resolve(State(s): State<Shared>, Auth(role): Auth, Path(id): Path<String>) -> AppResult<Json<Value>> {
     if role != Role::Owner {
-        return Err(AppError::Forbidden("only the owner can resolve comments".into()));
+        return Err(AppError::Forbidden("只有报告所有者可以解决评论".into()));
     }
     Ok(Json(json!(s.store().resolve(&id)?)))
 }
@@ -305,7 +327,7 @@ async fn reopen(
     body: Option<Json<BodyReq>>,
 ) -> AppResult<Json<Value>> {
     if role != Role::Owner {
-        return Err(AppError::Forbidden("only the owner can reopen comments".into()));
+        return Err(AppError::Forbidden("只有报告所有者可以重新打开评论".into()));
     }
     let body = body.and_then(|Json(b)| b.body);
     Ok(Json(json!(s.store().reopen(&id, body.as_deref())?)))
@@ -383,6 +405,21 @@ async fn confirm_extra(
 }
 
 #[derive(Deserialize)]
+struct RevertReq {
+    block_ids: Vec<String>,
+    body: String,
+}
+
+async fn revert_extra(
+    State(s): State<Shared>,
+    _: Owner,
+    Path(id): Path<String>,
+    Json(req): Json<RevertReq>,
+) -> AppResult<Json<Value>> {
+    Ok(Json(json!(s.store().revert_extra(&id, &req.block_ids, &req.body)?)))
+}
+
+#[derive(Deserialize)]
 struct CompareQ {
     from: String,
     to: String,
@@ -409,7 +446,7 @@ async fn rollback(
     Path(id): Path<String>,
     Json(req): Json<VersionReq>,
 ) -> AppResult<Json<Value>> {
-    let vid = req.version_id.ok_or_else(|| AppError::BadRequest("version_id is required".into()))?;
+    let vid = req.version_id.ok_or_else(|| AppError::BadRequest("缺少 version_id".into()))?;
     let v = s.store().rollback(&id, &vid)?;
     Ok(Json(json!({ "id": v.id, "seq": v.seq })))
 }

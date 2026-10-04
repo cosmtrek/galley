@@ -156,6 +156,7 @@ fn call_tool(s: &Shared, role: Role, name: &str, args: &Value) -> Result<String,
                 arg(args, "report_id")?,
                 arg(args, "markdown")?,
                 args.get("note").and_then(Value::as_str).unwrap_or("推送新版本"),
+                role,
             )?;
             Ok(format!("已推送 v{}（{}），改动 {} 处", v.seq, v.id, v.diff.map_or(0, |d| d.changes.len())))
         }

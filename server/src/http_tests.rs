@@ -400,6 +400,13 @@ async fn extra_changes_must_be_confirmed_before_the_round_is_done() {
     assert!(res["completed_at"].is_null(), "{res}");
     let extra_block = extra[0]["block_id"].as_str().unwrap().to_string();
 
+    // Rolling back mid-verification would make the review diff describe a document that no longer exists.
+    let base = round["base_version_id"].as_str().unwrap();
+    let rollback = format!("/api/reports/{rid}/rollback");
+    let (st, err, _) = t.req("POST", &rollback, Who::Owner, Some(json!({ "version_id": base }))).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{err}");
+    assert!(err["error"].as_str().unwrap().contains("待验证"), "{err}");
+
     t.req("POST", &format!("/api/comments/{cid}/resolve"), Who::Owner, None).await;
     let (_, rd, _) = t.req("GET", &format!("/api/rounds/{round_id}"), Who::Owner, None).await;
     assert_eq!(rd["status"], "verifying");
@@ -415,6 +422,113 @@ async fn extra_changes_must_be_confirmed_before_the_round_is_done() {
     assert!(rd["completed_at"].is_i64(), "{rd}");
     let (st, _, _) = t.req("POST", &confirm, Who::Owner, Some(json!({}))).await;
     assert_eq!(st, StatusCode::CONFLICT);
+    let (st, rb, _) = t.req("POST", &rollback, Who::Owner, Some(json!({ "version_id": base }))).await;
+    assert_eq!(st, StatusCode::OK, "{rb}");
+}
+
+#[tokio::test]
+async fn a_comment_on_a_heading_covers_the_whole_nested_section() {
+    const NESTED_V1: &str = "---\ntitle: 架构\n---\n\n## 三、架构设计\n\n总览一句。\n\n### 3.1 会话\n\n会话段落。\n\n### 3.2 记忆\n\n记忆段落。\n\n## 四、场景\n\n场景段落。\n";
+    // The agent rewrites 3.1, drops 3.2, adds 3.3 — and also touches section 四, which no comment covers.
+    const NESTED_V2: &str = "---\ntitle: 架构\n---\n\n## 三、架构设计\n\n总览一句。\n\n### 3.1 会话\n\n会话段落，重写过。\n\n### 3.3 技能\n\n技能段落。\n\n## 四、场景\n\n场景段落改了。\n";
+    let t = T::new().await;
+    let (_, r, _) = t.req("POST", "/api/reports", Who::Agent, Some(json!({ "markdown": NESTED_V1 }))).await;
+    let rid = r["id"].as_str().unwrap().to_string();
+    let (_, report, _) = t.req("GET", &format!("/api/reports/{rid}"), Who::Owner, None).await;
+    let heading = block_id(&report, "三、架构设计");
+    let (st, c, _) = t
+        .req("POST", &format!("/api/reports/{rid}/comments"), Who::Owner, Some(json!({ "body": "只留最有特色的小节",
+            "anchor": { "type": "text", "block_id": heading, "start": 2, "end": 6, "quote": "架构设计" } })))
+        .await;
+    assert_eq!(st, StatusCode::OK, "{c}");
+    let cid = c["id"].as_str().unwrap().to_string();
+    let (_, round, _) = t.req("POST", &format!("/api/reports/{rid}/rounds"), Who::Owner, None).await;
+    let round_id = round["id"].as_str().unwrap().to_string();
+    let (st, res, _) = t
+        .req("POST", &format!("/api/rounds/{round_id}/result"), Who::Agent, Some(json!({ "markdown": NESTED_V2, "summary": "x",
+            "replies": [{ "comment_id": cid, "action": "changed", "body": "已精简" }] })))
+        .await;
+    assert_eq!(st, StatusCode::OK, "{res}");
+    let extra = res["extra_changes"].as_array().unwrap();
+    let extra_texts: Vec<&str> = extra.iter().filter_map(|e| e["new_text"].as_str()).collect();
+    assert_eq!(extra_texts, vec!["场景段落改了。"], "only the uncommented section is extra: {res}");
+
+    // The verify page lists the subsection changes under the heading comment itself.
+    let (_, review, _) = t.req("GET", &format!("/api/rounds/{round_id}/review"), Who::Owner, None).await;
+    let item = &review["items"][0];
+    let section_changes = item["section_changes"].as_array().unwrap();
+    assert!(section_changes.len() >= 3, "rewrite, deletion and addition should all be listed: {item}");
+    assert!(section_changes.iter().all(|ch| ch["new_text"] != "场景段落改了。"), "{item}");
+}
+
+#[tokio::test]
+async fn reverting_an_extra_change_drafts_a_comment() {
+    let t = T::new().await;
+    let (_, r, _) = t.req("POST", "/api/reports", Who::Agent, Some(json!({ "markdown": V1 }))).await;
+    let rid = r["id"].as_str().unwrap().to_string();
+    let (_, report, _) = t.req("GET", &format!("/api/reports/{rid}"), Who::Owner, None).await;
+    let para = block_id(&report, "同比增长");
+    let (_, c, _) = t
+        .req("POST", &format!("/api/reports/{rid}/comments"), Who::Owner, Some(json!({ "body": "核实", "anchor": { "type": "block", "block_id": para } })))
+        .await;
+    let cid = c["id"].as_str().unwrap().to_string();
+    let (_, round, _) = t.req("POST", &format!("/api/reports/{rid}/rounds"), Who::Owner, None).await;
+    let round_id = round["id"].as_str().unwrap().to_string();
+    let (_, res, _) = t
+        .req("POST", &format!("/api/rounds/{round_id}/result"), Who::Agent, Some(json!({ "markdown": V2, "summary": "x",
+            "replies": [{ "comment_id": cid, "action": "changed", "body": "已改" }] })))
+        .await;
+    let extra_block = res["extra_changes"][0]["block_id"].as_str().unwrap().to_string();
+    t.req("POST", &format!("/api/comments/{cid}/resolve"), Who::Owner, None).await;
+
+    let revert = format!("/api/rounds/{round_id}/extra/revert");
+    let req = json!({ "block_ids": [extra_block], "body": "请恢复为修改前的内容" });
+    let (st, _, _) = t.req("POST", &revert, Who::Agent, Some(req.clone())).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    let (st, rd, _) = t.req("POST", &revert, Who::Owner, Some(req.clone())).await;
+    assert_eq!(st, StatusCode::OK, "{rd}");
+    assert_eq!(rd["status"], "done", "a reverted change no longer blocks the round");
+    let draft_id = rd["extra_changes"][0]["revert_comment_id"].as_str().unwrap().to_string();
+
+    let (_, all, _) = t.req("GET", &format!("/api/reports/{rid}/comments"), Who::Owner, None).await;
+    let draft = all.as_array().unwrap().iter().find(|c| c["id"] == draft_id.as_str()).expect("draft comment").clone();
+    assert_eq!(draft["status"], "draft", "{draft}");
+    assert_eq!(draft["anchor"]["block_id"], extra_block.as_str(), "{draft}");
+    let body = draft["body"].as_str().unwrap();
+    assert!(body.starts_with("请恢复为修改前的内容") && body.ends_with("原材料价格波动。"), "{body}");
+    assert!(!body.contains("另有新增一句"), "{body}");
+    let (st, _, _) = t.req("POST", &revert, Who::Owner, Some(req)).await;
+    assert_ne!(st, StatusCode::OK, "an extra change is handled only once");
+}
+
+#[tokio::test]
+async fn results_with_broken_tables_are_rejected_whole() {
+    let t = T::new().await;
+    let table = "| 指标 | 2025 |\n| --- | --- |\n| 装机 | 120 GW |\n";
+    // An imported report may already contain a broken table; that alone must not block the agent.
+    let legacy = "| 旧表 | 2024 | 增速 |\n| --- | --- |\n| 装机 | 90 GW | - |\n";
+    let md = format!("{V1}\n{table}\n{legacy}");
+    let (_, r, _) = t.req("POST", "/api/reports", Who::Agent, Some(json!({ "markdown": md }))).await;
+    let rid = r["id"].as_str().unwrap().to_string();
+    let (_, c, _) = t
+        .req("POST", &format!("/api/reports/{rid}/comments"), Who::Owner, Some(json!({ "body": "加一列增速", "anchor": { "type": "document" } })))
+        .await;
+    let cid = c["id"].as_str().unwrap().to_string();
+    let (_, round, _) = t.req("POST", &format!("/api/reports/{rid}/rounds"), Who::Owner, None).await;
+    let result = format!("/api/rounds/{}/result", round["id"].as_str().unwrap());
+    let reply = json!([{ "comment_id": cid, "action": "changed", "body": "已加" }]);
+
+    // Header gained a column but the delimiter row did not.
+    let broken = md.replace("| 指标 | 2025 |\n", "| 指标 | 2025 | 增速 |\n");
+    let (st, err, _) = t.req("POST", &result, Who::Agent, Some(json!({ "markdown": broken, "summary": "x", "replies": reply }))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{err}");
+    assert!(err["error"].as_str().unwrap().contains("表格"), "{err}");
+    let (_, versions, _) = t.req("GET", &format!("/api/reports/{rid}/versions"), Who::Owner, None).await;
+    assert_eq!(versions.as_array().unwrap().len(), 1, "rejected result left a version behind");
+
+    let fixed = broken.replace("| --- | --- |\n| 装机 | 120 GW |", "| --- | --- | --- |\n| 装机 | 120 GW | 10% |");
+    let (st, rd, _) = t.req("POST", &result, Who::Agent, Some(json!({ "markdown": fixed, "summary": "x", "replies": reply }))).await;
+    assert_eq!((st, rd["status"].as_str()), (StatusCode::OK, Some("verifying")), "{rd}");
 }
 
 #[tokio::test]
@@ -436,6 +550,96 @@ async fn expired_claims_are_reclaimed() {
     let (st, rd, _) = t.req("POST", &claim, Who::Agent, None).await;
     assert_eq!(st, StatusCode::OK, "{rd}");
     assert_eq!(rd["status"], "processing");
+}
+
+#[tokio::test]
+async fn only_the_owner_sees_the_agent_token() {
+    let t = T::new().await;
+    let (st, meta, _) = t.req("GET", "/api/meta", Who::Owner, None).await;
+    assert_eq!((st, meta["agent_token"].as_str()), (StatusCode::OK, Some(AGENT)));
+    assert!(meta["agent_last_seen"].is_null(), "no agent has connected yet: {meta}");
+    for who in [Who::Agent, Who::Anon] {
+        let (st, body, _) = t.req("GET", "/api/meta", who, None).await;
+        assert!(st.is_client_error() && !body.to_string().contains(AGENT), "{st} {body}");
+    }
+    // The agent's (rejected) meta request above still authenticated, so the owner now sees it as connected.
+    let (_, meta, _) = t.req("GET", "/api/meta", Who::Owner, None).await;
+    assert!(meta["agent_last_seen"].as_i64().is_some(), "{meta}");
+}
+
+#[tokio::test]
+async fn archive_freezes_a_report_and_delete_requires_it() {
+    let t = T::new().await;
+    let (_, r, _) = t.req("POST", "/api/reports", Who::Agent, Some(json!({ "markdown": V1 }))).await;
+    let rid = r["id"].as_str().unwrap().to_string();
+    let (_, report, _) = t.req("GET", &format!("/api/reports/{rid}"), Who::Owner, None).await;
+    let para = block_id(&report, "同比增长");
+    let comment = json!({ "body": "核实", "anchor": { "type": "block", "block_id": para } });
+    let (_, p, _) = t.req("POST", &format!("/api/reports/{rid}/publications"), Who::Owner, None).await;
+    let share = p["publication"]["path"].as_str().unwrap().to_string();
+
+    // Not archived yet: deleting is refused, and the agent can't archive.
+    let (st, _, _) = t.req("DELETE", &format!("/api/reports/{rid}"), Who::Owner, None).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    let (st, _, _) = t.req("POST", &format!("/api/reports/{rid}/archive"), Who::Agent, None).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    // Archive while the agent is mid-round: allowed, the round freezes and the agent's result is refused.
+    let (_, c, _) = t.req("POST", &format!("/api/reports/{rid}/comments"), Who::Owner, Some(comment.clone())).await;
+    let cid = c["id"].as_str().unwrap().to_string();
+    let (_, round, _) = t.req("POST", &format!("/api/reports/{rid}/rounds"), Who::Owner, None).await;
+    let round_id = round["id"].as_str().unwrap().to_string();
+    let (st, _, _) = t.req("POST", &format!("/api/rounds/{round_id}/claim"), Who::Agent, None).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, info, _) = t.req("POST", &format!("/api/reports/{rid}/archive"), Who::Owner, None).await;
+    assert_eq!(st, StatusCode::OK, "{info}");
+    assert!(info["archived_at"].is_i64(), "{info}");
+    let result = json!({ "markdown": V2, "summary": "x", "replies": [{ "comment_id": cid, "action": "changed", "body": "已改" }] });
+    let (st, e, _) = t.req("POST", &format!("/api/rounds/{round_id}/result"), Who::Agent, Some(result.clone())).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{e}");
+    assert!(e["error"].as_str().unwrap().contains("未保存"), "{e}");
+    let (_, pending, _) = t.req("GET", "/api/pending", Who::Agent, None).await;
+    assert!(pending.as_array().unwrap().is_empty(), "archived rounds are hidden from the agent: {pending}");
+    let (_, rd, _) = t.req("GET", &format!("/api/rounds/{round_id}"), Who::Owner, None).await;
+    assert_eq!(rd["status"], "processing", "the round itself is untouched: {rd}");
+
+    // Frozen for the owner too (comments, rounds, new versions)...
+    let (st, e, _) = t.req("POST", &format!("/api/reports/{rid}/comments"), Who::Owner, Some(comment.clone())).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{e}");
+    assert!(e["error"].as_str().unwrap().contains("已归档"), "{e}");
+    let (st, _, _) = t.req("POST", &format!("/api/comments/{cid}/resolve"), Who::Owner, None).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    let (st, _, _) = t.req("POST", &format!("/api/reports/{rid}/versions"), Who::Agent, Some(json!({ "markdown": V2 }))).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    // ...but still readable, and readers of the share link notice nothing.
+    let (st, _, _) = t.req("GET", &format!("/api/reports/{rid}"), Who::Owner, None).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, _, _) = t.req("GET", &share, Who::Anon, None).await;
+    assert_eq!(st, StatusCode::OK);
+
+    // Restore: the round resumes where it was and the agent can hand in its result now.
+    let (st, info, _) = t.req("POST", &format!("/api/reports/{rid}/unarchive"), Who::Owner, None).await;
+    assert_eq!(st, StatusCode::OK, "{info}");
+    assert!(info["archived_at"].is_null(), "{info}");
+    let (_, pending, _) = t.req("GET", "/api/pending", Who::Agent, None).await;
+    assert_eq!(pending.as_array().unwrap().len(), 1, "{pending}");
+    let (st, rd, _) = t.req("POST", &format!("/api/rounds/{round_id}/result"), Who::Agent, Some(result)).await;
+    assert_eq!(st, StatusCode::OK, "{rd}");
+    assert_eq!(rd["status"], "verifying");
+
+    // Archive again (mid-verification is fine too), then delete: everything is gone, share link included.
+    let (st, _, _) = t.req("POST", &format!("/api/reports/{rid}/archive"), Who::Owner, None).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, _, _) = t.req("DELETE", &format!("/api/reports/{rid}"), Who::Agent, None).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    let (st, body, _) = t.req("DELETE", &format!("/api/reports/{rid}"), Who::Owner, None).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let (st, _, _) = t.req("GET", &format!("/api/reports/{rid}"), Who::Owner, None).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    let (st, _, _) = t.req("GET", &share, Who::Anon, None).await;
+    assert!(st.is_client_error(), "{st}");
+    let (_, list, _) = t.req("GET", "/api/reports", Who::Owner, None).await;
+    assert!(list.as_array().unwrap().is_empty(), "{list}");
 }
 
 #[tokio::test]

@@ -44,16 +44,19 @@ impl From<std::io::Error> for AppError {
 
 impl From<crate::domain::TransitionError> for AppError {
     fn from(e: crate::domain::TransitionError) -> Self {
+        // The English detail stays in parentheses so agents and logs can still tell which transition failed.
         match e {
-            crate::domain::TransitionError::Forbidden { .. } => AppError::Forbidden(e.to_string()),
-            crate::domain::TransitionError::Invalid { .. } => AppError::Conflict(e.to_string()),
+            crate::domain::TransitionError::Forbidden { .. } => AppError::Forbidden(format!("没有权限执行这个操作（{e}）")),
+            crate::domain::TransitionError::Invalid { .. } => {
+                AppError::Conflict(format!("当前状态不允许这个操作，可能已被处理，请刷新页面后重试（{e}）"))
+            }
         }
     }
 }
 
 impl From<crate::anchor::AnchorError> for AppError {
     fn from(e: crate::anchor::AnchorError) -> Self {
-        AppError::BadRequest(format!("invalid anchor: {e}"))
+        AppError::BadRequest(format!("评论位置无效，请刷新页面后重新选择（{e}）"))
     }
 }
 

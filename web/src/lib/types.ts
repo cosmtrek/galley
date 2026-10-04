@@ -76,7 +76,9 @@ export interface BlockChange {
 }
 
 export interface ExtraChange extends BlockChange {
+  /** Handled: accepted, or turned into a draft comment (`revert_comment_id`) asking the agent to undo it. */
   confirmed: boolean;
+  revert_comment_id?: string | null;
 }
 
 export interface Version {
@@ -152,6 +154,7 @@ export interface ReportInfo {
   round_count: number;
   active_round: Round | null;
   publication: Publication | null;
+  archived_at: number | null;
 }
 
 export interface Message {

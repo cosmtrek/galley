@@ -1,4 +1,4 @@
-import type { Anchor, BlockChange, CommentStatus, RoundStatus } from "./types";
+import type { Anchor, Block, BlockChange, BlockKind, CommentStatus, RoundStatus } from "./types";
 
 export const STATUS_LABEL: Record<CommentStatus, string> = {
   draft: "未提交",
@@ -31,14 +31,33 @@ export const CHANGE_LABEL: Record<BlockChange["op"], string> = {
   moved: "移动",
 };
 
-export function anchorLabel(a: Anchor, sectionTitle?: string | null): string {
+export const BLOCK_KIND_LABEL: Record<BlockKind, string> = {
+  heading: "标题",
+  paragraph: "段落",
+  list_item: "列表项",
+  table: "表格",
+  code: "代码块",
+  chart: "图表",
+  diagram: "图表",
+  image: "图片",
+  quote: "引用",
+  rule: "分隔线",
+};
+
+/** Readable one-line summary of a block; tables use their header row instead of concatenated cell text. */
+export function blockSummary(b: Pick<Block, "kind" | "text" | "cells">): string {
+  if (b.kind === "table" && b.cells?.length) return b.cells[0].join(" · ");
+  return b.text;
+}
+
+export function anchorLabel(a: Anchor, sectionTitle?: string | null, kind?: BlockKind | null): string {
   switch (a.type) {
     case "document":
       return "整篇报告";
     case "section":
       return `章节：${sectionTitle ?? ""}`;
     case "block":
-      return "整段";
+      return kind ? BLOCK_KIND_LABEL[kind] : "整段";
     case "cell":
       return `表格单元格 (${a.row + 1}, ${a.col + 1})`;
     case "text":
@@ -55,6 +74,14 @@ export function fmtTime(ms: number | null | undefined): string {
   if (d.toDateString() === now.toDateString()) return `今天 ${hm}`;
   const md = `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hm}`;
   return d.getFullYear() === now.getFullYear() ? md : `${d.getFullYear()}-${md}`;
+}
+
+export function fmtAgo(ms: number): string {
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (s < 60) return "刚刚";
+  if (s < 3600) return `${Math.floor(s / 60)} 分钟前`;
+  if (s < 86400) return `${Math.floor(s / 3600)} 小时前`;
+  return fmtTime(ms);
 }
 
 export function truncate(s: string, n = 60): string {

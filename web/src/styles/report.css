@@ -80,6 +80,8 @@
   display: block;
   overflow-x: auto;
   max-width: 100%;
+  /* As a block box the table would span the full column, so its comment highlight would too. */
+  width: fit-content;
 }
 .report th, .report td {
   border: 1px solid var(--line);

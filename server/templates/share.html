@@ -17,18 +17,29 @@
 <body>
 <div class="share">
   {% if !toc.is_empty() %}
-  <nav class="toc" aria-label="目录">
-    <details open>
-      <summary>目录</summary>
-      <ul>
-        {% for (id, text, level) in toc %}
-        <li class="toc-l{{ level }}"><a href="#{{ id }}">{{ text }}</a></li>
-        {% endfor %}
-      </ul>
-    </details>
+  <nav class="toc toc-side" aria-label="目录">
+    <div class="toc-title">目录</div>
+    <ul>
+      {% for (id, text, level) in toc %}
+      <li class="toc-l{{ level }}"><a href="#{{ id }}">{{ text }}</a></li>
+      {% endfor %}
+    </ul>
   </nav>
   {% endif %}
   <main>
+    {% if !toc.is_empty() %}
+    {# Without scripts the open state cannot follow the viewport, so narrow screens get their own collapsed copy. #}
+    <nav class="toc toc-inline" aria-label="目录">
+      <details>
+        <summary>目录</summary>
+        <ul>
+          {% for (id, text, level) in toc %}
+          <li class="toc-l{{ level }}"><a href="#{{ id }}">{{ text }}</a></li>
+          {% endfor %}
+        </ul>
+      </details>
+    </nav>
+    {% endif %}
     <header class="share-head">
       <h1 class="report-title">{{ title }}</h1>
       <p class="share-meta">更新于 {{ updated }}</p>

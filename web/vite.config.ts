@@ -7,6 +7,8 @@ export default defineConfig({
   base: "/app/",
   plugins: [svelte()],
   server: {
+    // The reports page bundles the example report; allow just that directory, not the repo (data/ holds secrets).
+    fs: { allow: [".", "../examples"] },
     proxy: {
       "/api": backend,
       "/a": backend,

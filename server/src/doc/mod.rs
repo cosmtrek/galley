@@ -94,6 +94,32 @@ impl Doc {
         self.blocks.iter().position(|b| b.id == id)
     }
 
+    /// Paragraphs whose source is two or more `|` lines: a table the parser rejected (typically a header
+    /// row whose column count no longer matches the delimiter row). Returns the 1-based starting lines.
+    pub fn broken_tables<'a>(&'a self, markdown: &'a str) -> impl Iterator<Item = (u32, &'a Block)> + 'a {
+        self.blocks.iter().filter(|b| b.kind == BlockKind::Paragraph).filter_map(move |b| {
+            let (start, end) = b.src_lines;
+            let lines: Vec<&str> = markdown
+                .lines()
+                .skip(start.saturating_sub(1) as usize)
+                .take((end + 1).saturating_sub(start) as usize)
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect();
+            (lines.len() >= 2 && lines.iter().all(|l| l.starts_with('|'))).then_some((start, b))
+        })
+    }
+
+    /// The heading and everything under it, nested subsections included, up to the next heading of the same
+    /// or a higher level. `section_id` alone is flat (every heading starts a new one), so a comment on
+    /// "3. 架构" must be widened with this to also cover "3.1", "3.2", …
+    pub fn section_span(&self, heading_id: &str) -> Vec<String> {
+        let Some(i) = self.index_of(heading_id) else { return Vec::new() };
+        let level = self.blocks[i].level.unwrap_or(2);
+        let body = self.blocks[i + 1..].iter().take_while(|b| !(b.kind == BlockKind::Heading && b.level.unwrap_or(2) <= level));
+        std::iter::once(&self.blocks[i]).chain(body).map(|b| b.id.clone()).collect()
+    }
+
     /// Recomputes `section_id` after ids have been assigned.
     pub fn assign_sections(&mut self) {
         let mut current = String::new();

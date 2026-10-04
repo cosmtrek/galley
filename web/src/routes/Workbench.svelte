@@ -6,6 +6,7 @@
   import { anchorToRange, scopeFor, selectionToAnchor } from "../lib/anchor";
   import { STATUS_LABEL, truncate } from "../lib/format";
   import type { Anchor, Comment, CommentStatus, ReportInfo, Round, Version } from "../lib/types";
+  import PromptBox from "../components/PromptBox.svelte";
   import TopBar from "../components/TopBar.svelte";
   import Outline from "../components/Outline.svelte";
   import CommentCard from "../components/CommentCard.svelte";
@@ -46,10 +47,13 @@
   let ranges = new Map<string, Range>();
   let poll: ReturnType<typeof setInterval> | undefined;
 
-  const commenting = $derived(mode === "comment");
+  const archived = $derived(!!report?.archived_at);
+  const commenting = $derived(mode === "comment" && !archived);
   const titles = $derived(
     new Map((version?.doc.blocks ?? []).filter((b) => b.kind === "heading").map((b) => [b.id, b.text])),
   );
+  const blocks = $derived(new Map((version?.doc.blocks ?? []).map((b) => [b.id, b])));
+  const anchorBlock = (c: Comment) => (c.anchor.type === "block" ? blocks.get(c.anchor.block_id) : null);
   const statusCounts = $derived.by(() => {
     const m = new Map<CommentStatus, number>();
     for (const c of comments) m.set(c.status, (m.get(c.status) ?? 0) + 1);
@@ -65,12 +69,6 @@
   const drafts = $derived(statusCounts.get("draft") ?? 0);
   const round = $derived<Round | null>(report?.active_round ?? null);
   const roundBusy = $derived(round !== null);
-  const agentPrompt = $derived(
-    round && report
-      ? `处理 Galley 报告「${report.title}」第 ${round.seq} 轮评论（report_id: ${report.id}）：用 galley MCP 的 galley_get_round 读取评论，按评论修改后用 galley_submit_round 一次性提交新 Markdown、逐条回复和本轮摘要。`
-      : "",
-  );
-  let copied = $state(false);
   let roundOpen = $state(false);
   let roundEl = $state<HTMLElement | null>(null);
   let now = $state(Date.now());
@@ -83,21 +81,6 @@
     return `${Math.floor(min / 60)} 小时前`;
   }
 
-  async function copyPrompt() {
-    try {
-      await navigator.clipboard.writeText(agentPrompt);
-    } catch {
-      // Clipboard API needs a secure context; fall back to a hidden textarea.
-      const ta = document.createElement("textarea");
-      ta.value = agentPrompt;
-      document.body.append(ta);
-      ta.select();
-      document.execCommand("copy");
-      ta.remove();
-    }
-    copied = true;
-    setTimeout(() => (copied = false), 2000);
-  }
   const popComment = $derived(
     pop?.kind === "view" ? (comments.find((c) => c.id === (pop as { commentId: string }).commentId) ?? null) : null,
   );
@@ -508,6 +491,8 @@
     try {
       await post(`/api/reports/${id}/rounds`);
       await load();
+      // The user's next step is telling their AI tool, so put the prompt right in front of them.
+      roundOpen = true;
     } catch (e) {
       alert((e as Error).message);
     } finally {
@@ -520,7 +505,10 @@
 <svelte:document onmousedown={onDocMouseDown} />
 
 <TopBar {report} active="workbench">
-  {#if report}
+  {#if report && archived}
+    <span class="muted small">已归档，只读</span>
+    <a class="small" href="/app/r/{id}/publish">恢复 →</a>
+  {:else if report}
     {#if round}
       <div class="round-status" bind:this={roundEl}>
         {#if round.status === "verifying"}
@@ -541,13 +529,7 @@
                 {round.comment_count} 条评论 · 提交于 {ago(round.submitted_at)}{#if round.claimed_at} · 已认领 {ago(round.claimed_at)}{/if}
               </div>
               {#if round.status === "submitted"}
-                <div class="muted small">Galley 不会自己调用 AI。把这句话发给已接入 Galley 的 AI 工具：</div>
-                <code class="prompt">{agentPrompt}</code>
-                <div class="row">
-                  <a class="small" href="/app#agent">接入方法</a>
-                  <span class="spacer"></span>
-                  <button class="primary" onclick={copyPrompt}>{copied ? "已复制" : "复制"}</button>
-                </div>
+                <PromptBox {report} {round} />
               {:else}
                 <div class="muted small">AI 正在修改，完成后这里会变成「待验证」。期间可以继续写下一轮的草稿评论。</div>
               {/if}
@@ -561,8 +543,8 @@
       <button class:on={mode === "comment"} aria-pressed={mode === "comment"} title="评论模式（M 切换）" onclick={() => setMode("comment")}>评论</button>
     </div>
     <button class="primary" disabled={submittable === 0 || roundBusy || submitting} onclick={submitRound}
-      title={roundBusy ? "当前轮次还未结束" : ""}>
-      提交本轮{#if submittable}（{submittable}）{/if}
+      title={round ? `第 ${round.seq} 轮结束后才能提交下一轮` : ""}>
+      提交本轮{#if submittable && !roundBusy}（{submittable}）{/if}
     </button>
   {/if}
 </TopBar>
@@ -604,6 +586,7 @@
               comment={popComment}
               inline
               sectionTitle={popComment.section_id ? titles.get(popComment.section_id) : null}
+              block={anchorBlock(popComment)}
               onselect={() => {}}
               onchanged={load}
             />
@@ -656,6 +639,7 @@
               comment={c}
               active={c.id === activeId}
               sectionTitle={c.section_id ? titles.get(c.section_id) : null}
+              block={anchorBlock(c)}
               pickable={pickableComment(c)}
               picked={picked.has(c.id)}
               onpick={(on) => (on ? picked.add(c.id) : picked.delete(c.id))}

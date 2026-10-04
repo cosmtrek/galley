@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use crate::align::{align, assign_fresh};
 use crate::anchor::{Anchor, AnchorState, relocate};
 use crate::db::{now_ms, random_token, short_id};
-use crate::diff::{BlockChange, BlockDiff, compare};
+use crate::diff::{BlockChange, BlockDiff, ChangeOp, compare};
 use crate::doc::{BlockKind, Doc, parse};
 use crate::domain::{
     CommentAction, CommentStatus, Role, RoundAction, RoundStatus, comment_transition, round_transition,
@@ -52,6 +52,7 @@ pub struct ReportInfo {
     pub round_count: i64,
     pub active_round: Option<Round>,
     pub publication: Option<Publication>,
+    pub archived_at: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -83,7 +84,10 @@ pub struct VersionMeta {
 pub struct ExtraChange {
     #[serde(flatten)]
     pub change: BlockChange,
+    /// Handled: either accepted, or turned into a draft comment asking the agent to undo it.
     pub confirmed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revert_comment_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -278,11 +282,11 @@ impl Store {
     }
 
     pub fn report_info(&self, id: &str) -> AppResult<ReportInfo> {
-        let (title, summary, vid, created_at, updated_at): (String, String, String, i64, i64) =
+        let (title, summary, vid, created_at, updated_at, archived_at): (String, String, String, i64, i64, Option<i64>) =
             self.conn.query_row(
-                "SELECT title, summary, current_version_id, created_at, updated_at FROM reports WHERE id = ?1",
+                "SELECT title, summary, current_version_id, created_at, updated_at, archived_at FROM reports WHERE id = ?1",
                 [id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
             )?;
         let seq: i64 = self.conn.query_row("SELECT seq FROM versions WHERE id = ?1", [&vid], |r| r.get(0))?;
         let mut counts = Counts::default();
@@ -311,7 +315,47 @@ impl Store {
             round_count: self.conn.query_row("SELECT COUNT(*) FROM rounds WHERE report_id = ?1", [id], |r| r.get(0))?,
             active_round: self.active_round(id)?,
             publication: self.publications(id)?.into_iter().find(|p| p.revoked_at.is_none()),
+            archived_at,
         })
+    }
+
+    /// Archiving is the owner's call at any moment; a round in flight simply freezes, and whatever the agent
+    /// hands back while archived is refused (see `ensure_not_archived`).
+    pub fn archive(&mut self, report_id: &str) -> AppResult<ReportInfo> {
+        self.conn.execute("UPDATE reports SET archived_at = ?2 WHERE id = ?1 AND archived_at IS NULL", params![report_id, now_ms()])?;
+        self.report_info(report_id)
+    }
+
+    pub fn unarchive(&mut self, report_id: &str) -> AppResult<ReportInfo> {
+        self.conn.execute("UPDATE reports SET archived_at = NULL WHERE id = ?1", [report_id])?;
+        self.report_info(report_id)
+    }
+
+    /// Permanently removes a report and everything under it, share links included. Only archived reports can
+    /// be deleted, so a stray click has to get past archiving first.
+    pub fn delete_report(&mut self, report_id: &str) -> AppResult<()> {
+        if self.report_info(report_id)?.archived_at.is_none() {
+            return Err(AppError::Conflict("只能删除已归档的报告，请先归档".into()));
+        }
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM views WHERE publication_id IN (SELECT id FROM publications WHERE report_id = ?1)", [report_id])?;
+        tx.execute("DELETE FROM publications WHERE report_id = ?1", [report_id])?;
+        // messages and comment_anchors cascade from comments.
+        tx.execute("DELETE FROM comments WHERE report_id = ?1", [report_id])?;
+        tx.execute("DELETE FROM rounds WHERE report_id = ?1", [report_id])?;
+        tx.execute("DELETE FROM versions WHERE report_id = ?1", [report_id])?;
+        tx.execute("DELETE FROM assets WHERE report_id = ?1", [report_id])?;
+        tx.execute("DELETE FROM asset_blobs WHERE report_id = ?1", [report_id])?;
+        tx.execute("DELETE FROM reports WHERE id = ?1", [report_id])?;
+        tx.commit()?;
+        // Blobs are only reachable through the rows just removed; a leftover directory is harmless, so don't fail on it.
+        let dir = self.assets_dir.join(report_id);
+        if dir.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&dir) {
+                eprintln!("delete report {report_id}: could not remove assets: {e}");
+            }
+        }
+        Ok(())
     }
 
     pub fn version(&self, id: &str) -> AppResult<Version> {
@@ -357,8 +401,8 @@ impl Store {
     }
 
     /// Pushes a new version outside the round flow (agent revision or owner rollback).
-    pub fn push_version(&mut self, report_id: &str, markdown: &str, note: &str) -> AppResult<Version> {
-        self.push_version_pinned(report_id, markdown, note, &HashMap::new())
+    pub fn push_version(&mut self, report_id: &str, markdown: &str, note: &str, role: Role) -> AppResult<Version> {
+        self.push_version_pinned(report_id, markdown, note, &HashMap::new(), role)
     }
 
     fn push_version_pinned(
@@ -367,7 +411,9 @@ impl Store {
         markdown: &str,
         note: &str,
         pinned: &HashMap<String, String>,
+        role: Role,
     ) -> AppResult<Version> {
+        ensure_not_archived(&self.conn, report_id, role)?;
         self.ensure_no_pending_round(report_id)?;
         let tx = self.conn.transaction()?;
         let (vid, relocs) = insert_version(&tx, report_id, markdown, None, note, pinned)?;
@@ -385,16 +431,20 @@ impl Store {
         if target.report_id != report_id {
             return Err(AppError::NotFound);
         }
+        // A rollback during verification would leave the review diff describing a document that is gone.
+        if let Some(r) = self.active_round(report_id)? {
+            return Err(round_busy(&r, "回退版本"));
+        }
         // Restore the images the target was rendered with, not whatever was uploaded since.
         let pinned = asset_refs(&target.html, &asset_prefix(report_id));
-        self.push_version_pinned(report_id, &target.markdown, &format!("回退到 v{}", target.seq), &pinned)
+        self.push_version_pinned(report_id, &target.markdown, &format!("回退到 v{}", target.seq), &pinned, Role::Owner)
     }
 
     pub fn compare(&self, from: &str, to: &str) -> AppResult<Comparison> {
         let a = self.version(from)?;
         let b = self.version(to)?;
         if a.report_id != b.report_id {
-            return Err(AppError::BadRequest("versions belong to different reports".into()));
+            return Err(AppError::BadRequest("这两个版本不属于同一份报告".into()));
         }
         let metas = self.versions(&a.report_id)?;
         let meta = |id: &str| metas.iter().find(|m| m.id == id).map(|m| VersionMeta {
@@ -417,17 +467,18 @@ impl Store {
     }
 
     pub fn add_asset(&mut self, report_id: &str, name: &str, bytes: &[u8]) -> AppResult<String> {
+        ensure_not_archived(&self.conn, report_id, Role::Agent)?;
         self.conn.query_row("SELECT 1 FROM reports WHERE id = ?1", [report_id], |_| Ok(()))?;
         let valid = !name.is_empty()
             && name.len() <= 128
             && name.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
             && !name.starts_with('.');
         if !valid {
-            return Err(AppError::BadRequest("asset name must match [A-Za-z0-9._-]+".into()));
+            return Err(AppError::BadRequest("文件名只能包含字母、数字、点、下划线和连字符".into()));
         }
         let mime = mime_guess::from_path(name).first_or_octet_stream();
         if mime.type_() != "image" {
-            return Err(AppError::BadRequest("only images can be uploaded".into()));
+            return Err(AppError::BadRequest("只能上传图片".into()));
         }
         let sha = hex::encode(Sha256::digest(bytes));
         self.write_blob(report_id, &sha, bytes)?;
@@ -538,23 +589,13 @@ impl Store {
 
     pub fn create_comment(&mut self, report_id: &str, req: NewComment) -> AppResult<Comment> {
         if req.body.trim().is_empty() {
-            return Err(AppError::BadRequest("comment body is empty".into()));
+            return Err(AppError::BadRequest("评论内容不能为空".into()));
         }
+        ensure_not_archived(&self.conn, report_id, Role::Owner)?;
         let v = self.current_version(report_id)?;
         let anchor = req.anchor.validate(&v.doc)?;
-        let now = now_ms();
         let tx = self.conn.transaction()?;
-        let id = insert_with_id("c_", 6, |id| {
-            tx.execute(
-                "INSERT INTO comments (id, report_id, status, body, created_version_id, created_at, updated_at)
-                 VALUES (?1, ?2, 'draft', ?3, ?4, ?5, ?5)",
-                params![id, report_id, req.body.trim(), v.id, now],
-            )
-        })?;
-        tx.execute(
-            "INSERT INTO comment_anchors (comment_id, version_id, anchor, state) VALUES (?1, ?2, ?3, 'exact')",
-            params![id, v.id, serde_json::to_string(&anchor)?],
-        )?;
+        let id = insert_draft(&tx, report_id, &v.id, req.body.trim(), &anchor)?;
         touch_report(&tx, report_id)?;
         tx.commit()?;
         self.comment(&id)
@@ -562,10 +603,11 @@ impl Store {
 
     pub fn update_comment(&mut self, id: &str, patch: CommentPatch) -> AppResult<Comment> {
         let tx = self.conn.transaction()?;
+        ensure_not_archived(&tx, &comment_report_round(&tx, id)?.0, Role::Owner)?;
         transition_comment(&tx, id, CommentAction::Edit, Role::Owner)?;
         if let Some(b) = patch.body {
             if b.trim().is_empty() {
-                return Err(AppError::BadRequest("comment body is empty".into()));
+                return Err(AppError::BadRequest("评论内容不能为空".into()));
             }
             tx.execute("UPDATE comments SET body = ?2 WHERE id = ?1", params![id, b.trim()])?;
         }
@@ -575,6 +617,7 @@ impl Store {
 
     pub fn delete_comment(&mut self, id: &str) -> AppResult<()> {
         let tx = self.conn.transaction()?;
+        ensure_not_archived(&tx, &comment_report_round(&tx, id)?.0, Role::Owner)?;
         transition_comment(&tx, id, CommentAction::Delete, Role::Owner)?;
         tx.commit()?;
         Ok(())
@@ -582,9 +625,10 @@ impl Store {
 
     pub fn owner_message(&mut self, id: &str, body: &str) -> AppResult<Comment> {
         if body.trim().is_empty() {
-            return Err(AppError::BadRequest("message is empty".into()));
+            return Err(AppError::BadRequest("回复内容不能为空".into()));
         }
         let tx = self.conn.transaction()?;
+        ensure_not_archived(&tx, &comment_report_round(&tx, id)?.0, Role::Owner)?;
         transition_comment(&tx, id, CommentAction::OwnerMessage, Role::Owner)?;
         insert_message(&tx, id, Role::Owner, None, body.trim(), None)?;
         tx.commit()?;
@@ -594,6 +638,7 @@ impl Store {
     pub fn resolve(&mut self, id: &str) -> AppResult<Comment> {
         let tx = self.conn.transaction()?;
         let (report_id, round_id) = comment_report_round(&tx, id)?;
+        ensure_not_archived(&tx, &report_id, Role::Owner)?;
         transition_comment(&tx, id, CommentAction::Resolve, Role::Owner)?;
         let vid: String = tx.query_row("SELECT current_version_id FROM reports WHERE id = ?1", [&report_id], |r| r.get(0))?;
         tx.execute("UPDATE comments SET resolved_version_id = ?2 WHERE id = ?1", params![id, vid])?;
@@ -607,7 +652,8 @@ impl Store {
 
     pub fn reopen(&mut self, id: &str, body: Option<&str>) -> AppResult<Comment> {
         let tx = self.conn.transaction()?;
-        let (_, round_id) = comment_report_round(&tx, id)?;
+        let (report_id, round_id) = comment_report_round(&tx, id)?;
+        ensure_not_archived(&tx, &report_id, Role::Owner)?;
         transition_comment(&tx, id, CommentAction::Reopen, Role::Owner)?;
         tx.execute("UPDATE comments SET resolved_version_id = NULL WHERE id = ?1", [id])?;
         insert_message(&tx, id, Role::Owner, Some("reopen"), body.unwrap_or("").trim(), round_id.as_deref())?;
@@ -621,16 +667,12 @@ impl Store {
     // ----- rounds -----
 
     fn ensure_no_pending_round(&self, report_id: &str) -> AppResult<()> {
-        if let Some(r) = self.active_round(report_id)? {
-            if matches!(r.status, RoundStatus::Submitted | RoundStatus::Processing) {
-                return Err(AppError::Conflict(format!(
-                    "round {} is {}; finish it before pushing a new version",
-                    r.seq,
-                    r.status.as_str()
-                )));
+        match self.active_round(report_id)? {
+            Some(r) if matches!(r.status, RoundStatus::Submitted | RoundStatus::Processing) => {
+                Err(round_busy(&r, "推送新版本"))
             }
+            _ => Ok(()),
         }
-        Ok(())
     }
 
     pub fn active_round(&self, report_id: &str) -> AppResult<Option<Round>> {
@@ -662,7 +704,10 @@ impl Store {
     pub fn pending_rounds(&self) -> AppResult<Vec<(ReportInfo, Round)>> {
         let ids: Vec<String> = self
             .conn
-            .prepare("SELECT report_id FROM rounds WHERE status IN ('submitted', 'processing') ORDER BY submitted_at")?
+            .prepare(
+                "SELECT r.report_id FROM rounds r JOIN reports p ON p.id = r.report_id
+                 WHERE r.status IN ('submitted', 'processing') AND p.archived_at IS NULL ORDER BY r.submitted_at",
+            )?
             .query_map([], |r| r.get(0))?
             .collect::<Result<_, _>>()?;
         let mut out = Vec::new();
@@ -676,12 +721,9 @@ impl Store {
     }
 
     pub fn submit_round(&mut self, report_id: &str) -> AppResult<Round> {
+        ensure_not_archived(&self.conn, report_id, Role::Owner)?;
         if let Some(r) = self.active_round(report_id)? {
-            return Err(AppError::Conflict(format!(
-                "round {} is still {}; finish verifying it first",
-                r.seq,
-                r.status.as_str()
-            )));
+            return Err(round_busy(&r, "提交下一轮"));
         }
         let tx = self.conn.transaction()?;
         let ids: Vec<String> = tx
@@ -689,7 +731,7 @@ impl Store {
             .query_map([report_id], |r| r.get(0))?
             .collect::<Result<_, _>>()?;
         if ids.is_empty() {
-            return Err(AppError::Conflict("no draft or open comments to submit".into()));
+            return Err(AppError::Conflict("没有可提交的评论：先写评论，或重新打开需要继续修改的评论".into()));
         }
         let seq: i64 =
             tx.query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM rounds WHERE report_id = ?1", [report_id], |r| r.get(0))?;
@@ -712,6 +754,7 @@ impl Store {
     pub fn claim(&mut self, round_id: &str, role: Role) -> AppResult<Round> {
         let tx = self.conn.transaction()?;
         let r = load_round_raw(&tx, round_id)?;
+        ensure_not_archived(&tx, &r.report_id, role)?;
         let next = round_transition(r.status, RoundAction::Claim { lease_expired: lease_expired(&r) }, role)?;
         tx.execute(
             "UPDATE rounds SET status = ?2, claimed_at = ?3 WHERE id = ?1",
@@ -745,6 +788,7 @@ impl Store {
     pub fn submit_result(&mut self, round_id: &str, role: Role, req: ResultReq) -> AppResult<Round> {
         let tx = self.conn.transaction()?;
         let round = load_round_raw(&tx, round_id)?;
+        ensure_not_archived(&tx, &round.report_id, role)?;
         let next = round_transition(round.status, RoundAction::Result, role)?;
 
         let open: Vec<String> = tx
@@ -755,36 +799,50 @@ impl Store {
         let mut seen = HashSet::new();
         for r in &req.replies {
             if !open_set.contains(r.comment_id.as_str()) {
-                return Err(AppError::BadRequest(format!("{} is not an open comment of this round", r.comment_id)));
+                return Err(AppError::BadRequest(format!("{} 不是本轮待处理的评论", r.comment_id)));
             }
             if !seen.insert(r.comment_id.as_str()) {
-                return Err(AppError::BadRequest(format!("duplicate reply for {}", r.comment_id)));
+                return Err(AppError::BadRequest(format!("{} 有重复的回复，每条评论只回复一次", r.comment_id)));
             }
             if !matches!(r.action.as_str(), "changed" | "answered" | "clarify") {
                 return Err(AppError::BadRequest(format!(
-                    "reply action for {} must be changed, answered or clarify",
+                    "{} 的回复 action 只能是 changed、answered 或 clarify",
                     r.comment_id
                 )));
             }
             if r.body.trim().is_empty() {
-                return Err(AppError::BadRequest(format!("reply body for {} is empty", r.comment_id)));
+                return Err(AppError::BadRequest(format!("{} 的回复内容为空", r.comment_id)));
             }
         }
         let missing: Vec<&str> = open.iter().map(|s| s.as_str()).filter(|id| !seen.contains(id)).collect();
         if !missing.is_empty() {
-            return Err(AppError::BadRequest(format!("missing replies for: {}", missing.join(", "))));
+            return Err(AppError::BadRequest(format!(
+                "缺少这些评论的回复：{}。每条待处理评论都要有一条回复，本次提交未生效",
+                missing.join(", ")
+            )));
         }
 
         let base = load_version(&tx, &round.base_version_id)?;
         let mut result_vid = base.id.clone();
         let mut relocs = Vec::new();
         let mut diff = None;
+        let mut result_doc = None;
         if let Some(md) = req.markdown.as_deref().filter(|m| m.trim() != base.markdown.trim()) {
             let note = format!("第 {} 轮修改", round.seq);
             let (vid, r) = insert_version(&tx, &round.report_id, md, Some(round_id), &note, &HashMap::new())?;
+            let result = load_version(&tx, &vid)?;
+            // Tables already broken in the base are the owner's content, not this result's fault.
+            let pre_existing = |text: &str| base.doc.blocks.iter().any(|b| b.kind == BlockKind::Paragraph && b.text == text);
+            if let Some((line, _)) = result.doc.broken_tables(&result.markdown).find(|(_, b)| !pre_existing(&b.text)) {
+                // Dropping the transaction discards the version just inserted, keeping the result atomic.
+                return Err(AppError::BadRequest(format!(
+                    "Markdown 第 {line} 行附近的表格无法解析，会显示成一段竖线文字。检查表头、分隔行（如 | --- | --- |）和每一行的列数是否一致，修好后重新提交；本次提交未生效"
+                )));
+            }
             result_vid = vid;
             relocs = r;
-            diff = load_version(&tx, &result_vid)?.diff;
+            diff = result.diff;
+            result_doc = Some(result.doc);
         }
 
         for r in &req.replies {
@@ -802,9 +860,9 @@ impl Store {
             }
         }
 
-        let extra = match &diff {
-            Some(d) => extra_changes(&tx, round_id, &base.doc, d)?,
-            None => Vec::new(),
+        let extra = match (&diff, &result_doc) {
+            (Some(d), Some(result)) => extra_changes(&tx, round_id, &base.doc, result, d)?,
+            _ => Vec::new(),
         };
         tx.execute(
             "UPDATE rounds SET status = ?2, result_version_id = ?3, summary = ?4, extra_changes = ?5 WHERE id = ?1",
@@ -820,11 +878,12 @@ impl Store {
     pub fn confirm_extra(&mut self, round_id: &str, block_id: Option<&str>) -> AppResult<Round> {
         let tx = self.conn.transaction()?;
         let mut round = load_round_raw(&tx, round_id)?;
+        ensure_not_archived(&tx, &round.report_id, Role::Owner)?;
         round_transition(round.status, RoundAction::ConfirmExtra, Role::Owner)?;
         if let Some(b) = block_id
             && !round.extra_changes.iter().any(|e| e.change.block_id == b)
         {
-            return Err(AppError::BadRequest(format!("{b} is not an extra change of this round")));
+            return Err(AppError::BadRequest(format!("{b} 不是本轮评论之外的改动，请刷新页面")));
         }
         for e in &mut round.extra_changes {
             if block_id.is_none_or(|b| b == e.change.block_id) {
@@ -836,6 +895,77 @@ impl Store {
             params![round_id, serde_json::to_string(&round.extra_changes)?],
         )?;
         maybe_complete_round(&tx, round_id)?;
+        tx.commit()?;
+        self.round(round_id)
+    }
+
+    /// Turns unwanted extra changes into one draft comment asking the agent to undo them, and counts them as
+    /// handled. Several ids come from one displayed replacement (a deleted block plus the block that took its place).
+    pub fn revert_extra(&mut self, round_id: &str, block_ids: &[String], body: &str) -> AppResult<Round> {
+        if body.trim().is_empty() {
+            return Err(AppError::BadRequest("评论内容不能为空".into()));
+        }
+        let tx = self.conn.transaction()?;
+        let mut round = load_round_raw(&tx, round_id)?;
+        ensure_not_archived(&tx, &round.report_id, Role::Owner)?;
+        round_transition(round.status, RoundAction::ConfirmExtra, Role::Owner)?;
+        let picked: Vec<BlockChange> = block_ids
+            .iter()
+            .map(|b| {
+                round
+                    .extra_changes
+                    .iter()
+                    .find(|e| &e.change.block_id == b && !e.confirmed)
+                    .map(|e| e.change.clone())
+                    .ok_or_else(|| AppError::BadRequest(format!("{b} 不是本轮待确认的改动，请刷新页面")))
+            })
+            .collect::<AppResult<_>>()?;
+        if picked.is_empty() {
+            return Err(AppError::BadRequest("没有选择要改回去的改动".into()));
+        }
+
+        let base = load_version(&tx, &round.base_version_id)?;
+        let vid: String =
+            tx.query_row("SELECT current_version_id FROM reports WHERE id = ?1", [&round.report_id], |r| r.get(0))?;
+        let current = load_version(&tx, &vid)?;
+        // Anchor on a block that exists now; a deletion is pinned to the block it used to follow.
+        let anchor = picked
+            .iter()
+            .find_map(|c| match c.op {
+                ChangeOp::Deleted => c.after.as_deref(),
+                _ => Some(c.block_id.as_str()),
+            }
+            .filter(|b| current.doc.block(b).is_some()))
+            .map_or(Anchor::Document, |b| Anchor::Block { block_id: b.to_string() });
+        // The agent only sees the current version, so quote the original Markdown it should restore.
+        let originals: Vec<String> = picked
+            .iter()
+            .filter_map(|c| base.doc.block(&c.block_id))
+            .map(|b| {
+                let (start, end) = b.src_lines;
+                let skip = start.saturating_sub(1) as usize;
+                let take = (end + 1).saturating_sub(start) as usize;
+                base.markdown.lines().skip(skip).take(take).collect::<Vec<_>>().join("\n")
+            })
+            .collect();
+        let mut full = body.trim().to_string();
+        if !originals.is_empty() {
+            full.push_str(&format!("\n\n修改前的原文：\n\n{}", originals.join("\n\n")));
+        }
+        let cid = insert_draft(&tx, &round.report_id, &current.id, &full, &anchor)?;
+
+        for e in &mut round.extra_changes {
+            if block_ids.contains(&e.change.block_id) {
+                e.confirmed = true;
+                e.revert_comment_id = Some(cid.clone());
+            }
+        }
+        tx.execute(
+            "UPDATE rounds SET extra_changes = ?2 WHERE id = ?1",
+            params![round_id, serde_json::to_string(&round.extra_changes)?],
+        )?;
+        maybe_complete_round(&tx, round_id)?;
+        touch_report(&tx, &round.report_id)?;
         tx.commit()?;
         self.round(round_id)
     }
@@ -867,8 +997,10 @@ impl Store {
             let spans = |a: &Anchor| matches!(a, Anchor::Text { end_block_id: Some(_), .. });
             let mut change = None;
             let mut section_changes = Vec::new();
-            if let Anchor::Section { section_id } = &c.anchor {
-                section_changes = diff.changes.iter().filter(|ch| &ch.section_id == section_id).cloned().collect();
+            let heading = section_heading(&c.anchor, &base.doc).or_else(|| base_anchor.as_ref().and_then(|a| section_heading(a, &base.doc)));
+            if let Some(h) = heading {
+                let span: HashSet<String> = base.doc.section_span(h).into_iter().chain(target.doc.section_span(h)).collect();
+                section_changes = diff.changes.iter().filter(|ch| span.contains(&ch.block_id)).cloned().collect();
             } else if spans(&c.anchor) || base_anchor.as_ref().is_some_and(spans) {
                 let mut ids: HashSet<String> = c.anchor.block_ids(&target.doc).into_iter().collect();
                 if let Some(a) = &base_anchor {
@@ -1046,6 +1178,26 @@ impl Store {
         Ok(created.is_some_and(|t| now_ms() - t < SESSION_TTL_MS))
     }
 
+    /// Records that an agent authenticated. Writes at most once a minute so the owner's "last connected"
+    /// indicator doesn't cost a disk write per agent request.
+    pub fn agent_seen(&mut self) -> AppResult<()> {
+        let now = now_ms();
+        if self.agent_last_seen()?.is_some_and(|t| now - t < 60_000) {
+            return Ok(());
+        }
+        self.conn.execute(
+            "INSERT INTO kv (key, value) VALUES ('agent_last_seen', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [now.to_string()],
+        )?;
+        Ok(())
+    }
+
+    pub fn agent_last_seen(&self) -> AppResult<Option<i64>> {
+        let v: Option<String> =
+            self.conn.query_row("SELECT value FROM kv WHERE key = 'agent_last_seen'", [], |r| r.get(0)).optional()?;
+        Ok(v.and_then(|s| s.parse().ok()))
+    }
+
     pub fn delete_session(&mut self, token: &str) -> AppResult<()> {
         self.conn.execute("DELETE FROM sessions WHERE token = ?1", [session_key(token)])?;
         Ok(())
@@ -1090,9 +1242,44 @@ fn insert_with_id(prefix: &str, len: usize, mut insert: impl FnMut(&str) -> rusq
     Err(AppError::Internal(format!("could not allocate a unique {prefix} id")))
 }
 
+fn insert_draft(tx: &Transaction, report_id: &str, version_id: &str, body: &str, anchor: &Anchor) -> AppResult<String> {
+    let now = now_ms();
+    let id = insert_with_id("c_", 6, |id| {
+        tx.execute(
+            "INSERT INTO comments (id, report_id, status, body, created_version_id, created_at, updated_at)
+             VALUES (?1, ?2, 'draft', ?3, ?4, ?5, ?5)",
+            params![id, report_id, body, version_id, now],
+        )
+    })?;
+    tx.execute(
+        "INSERT INTO comment_anchors (comment_id, version_id, anchor, state) VALUES (?1, ?2, ?3, 'exact')",
+        params![id, version_id, serde_json::to_string(anchor)?],
+    )?;
+    Ok(id)
+}
+
+fn round_busy(r: &Round, what: &str) -> AppError {
+    let state = match r.status {
+        RoundStatus::Verifying => "还在待验证，请先在验证页处理完",
+        _ => "正在等待 AI 处理，请等 AI 交回结果",
+    };
+    AppError::Conflict(format!("第 {} 轮{state}，再{what}", r.seq))
+}
+
 fn touch_report(tx: &Connection, report_id: &str) -> AppResult<()> {
     tx.execute("UPDATE reports SET updated_at = ?2 WHERE id = ?1", params![report_id, now_ms()])?;
     Ok(())
+}
+
+/// Archived reports are read-only for everyone. The owner is told how to continue; the agent is told its
+/// work was not saved, since its result is dropped rather than queued.
+fn ensure_not_archived(conn: &Connection, report_id: &str, role: Role) -> AppResult<()> {
+    let archived: Option<i64> = conn.query_row("SELECT archived_at FROM reports WHERE id = ?1", [report_id], |r| r.get(0))?;
+    match (archived, role) {
+        (None, _) => Ok(()),
+        (Some(_), Role::Owner) => Err(AppError::Conflict("报告已归档，恢复后才能继续修改".into())),
+        (Some(_), Role::Agent) => Err(AppError::Conflict("报告已归档，本次提交未保存；owner 恢复报告后可以重新提交".into())),
+    }
 }
 
 fn comment_report_round(conn: &Connection, id: &str) -> AppResult<(String, Option<String>)> {
@@ -1169,7 +1356,7 @@ fn insert_version(
     pinned: &HashMap<String, String>,
 ) -> AppResult<(String, Vec<(String, AnchorState)>)> {
     if markdown.trim().is_empty() {
-        return Err(AppError::BadRequest("markdown is empty".into()));
+        return Err(AppError::BadRequest("Markdown 内容为空".into()));
     }
     let prev_id: Option<String> = tx
         .query_row("SELECT current_version_id FROM reports WHERE id = ?1", [report_id], |r| r.get(0))
@@ -1491,41 +1678,43 @@ fn packet_comment(c: &Comment, doc: &Doc) -> PacketComment {
     }
 }
 
-/// Changed blocks that no comment of this round is anchored to.
-fn extra_changes(tx: &Transaction, round_id: &str, base: &Doc, diff: &BlockDiff) -> AppResult<Vec<ExtraChange>> {
+/// Changed blocks that no comment of this round covers. A section comment, or any comment anchored on a
+/// heading, covers the whole section in both versions so the agent's rewrite of it isn't flagged as extra.
+fn extra_changes(tx: &Transaction, round_id: &str, base: &Doc, result: &Doc, diff: &BlockDiff) -> AppResult<Vec<ExtraChange>> {
     let ids: Vec<String> = tx
         .prepare("SELECT id FROM comments WHERE round_id = ?1")?
         .query_map([round_id], |r| r.get(0))?
         .collect::<Result<_, _>>()?;
-    let mut blocks: HashSet<String> = HashSet::new();
-    let mut sections: HashSet<String> = HashSet::new();
+    let mut covered: HashSet<String> = HashSet::new();
     for id in ids {
         let anchors: Vec<String> = tx
             .prepare("SELECT anchor FROM comment_anchors WHERE comment_id = ?1")?
             .query_map([&id], |r| r.get(0))?
             .collect::<Result<_, _>>()?;
         for a in anchors {
-            match serde_json::from_str::<Anchor>(&a)? {
-                Anchor::Section { section_id } => {
-                    sections.insert(section_id);
-                }
-                Anchor::Document => {}
-                other => blocks.extend(other.block_ids(base)),
+            let anchor = serde_json::from_str::<Anchor>(&a)?;
+            if let Some(h) = section_heading(&anchor, base) {
+                covered.extend(base.section_span(h));
+                covered.extend(result.section_span(h));
             }
+            covered.extend(anchor.block_ids(base));
         }
     }
-    let base_sections: HashMap<&str, &str> =
-        base.blocks.iter().map(|b| (b.id.as_str(), b.section_id.as_str())).collect();
     Ok(diff
         .changes
         .iter()
-        .filter(|c| {
-            !blocks.contains(&c.block_id)
-                && !sections.contains(&c.section_id)
-                && !base_sections.get(c.block_id.as_str()).is_some_and(|s| sections.contains(*s))
-        })
-        .map(|c| ExtraChange { change: c.clone(), confirmed: false })
+        .filter(|c| !covered.contains(&c.block_id))
+        .map(|c| ExtraChange { change: c.clone(), confirmed: false, revert_comment_id: None })
         .collect())
+}
+
+/// The heading whose section a comment is about: an explicit section anchor, or any anchor sitting on a heading.
+fn section_heading<'a>(anchor: &'a Anchor, doc: &Doc) -> Option<&'a str> {
+    match anchor {
+        Anchor::Section { section_id } => Some(section_id.as_str()),
+        Anchor::Document => None,
+        a => a.block_id().filter(|b| doc.block(b).is_some_and(|x| x.kind == BlockKind::Heading)),
+    }
 }
 
 pub fn day_string(ms: i64) -> String {
