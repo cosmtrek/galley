@@ -75,7 +75,7 @@
               <span class="spacer"></span>
               {#if v.id === report?.current_version_id}<span class="badge">当前</span>{/if}
             </div>
-            <div class="small">{v.note}{#if v.seq > 1} · {v.changes} 处改动{/if}</div>
+            <div class="small">{#if v.round_id}<a href="/app/r/{id}/verify?round={v.round_id}" title="查看第 {v.round_seq} 轮的验证记录">{v.note}</a>{:else}{v.note}{/if}{#if v.seq > 1} · {v.changes} 处改动{/if}</div>
             <div class="pick">
               <label><input type="radio" name="from" checked={v.id === from} onchange={() => pick("from", v.id)} /> 旧</label>
               <label><input type="radio" name="to" checked={v.id === to} onchange={() => pick("to", v.id)} /> 新</label>

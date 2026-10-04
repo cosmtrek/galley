@@ -17,19 +17,34 @@
   <a class="brand" href="/app">Galley</a>
   {#if report}
     <span class="muted">/</span>
-    <span class="title" title={report.title}>{report.title}</span>
-    <span class="badge">v{report.current_seq}</span>
-    <nav>
-      <a href="/app/r/{report.id}" class:active={active === "workbench"}>批注</a>
-      <a href="/app/r/{report.id}/verify" class:active={active === "verify"}>
-        验证{#if verifyCount > 0}<span class="count">&nbsp;{verifyCount}</span>{/if}
-      </a>
-      <a href="/app/r/{report.id}/history" class:active={active === "history"}>历史</a>
-      <a href="/app/r/{report.id}/publish" class:active={active === "publish"} title={stale ? `分享的是 v${pub?.version_seq}，当前 v${report.current_seq}` : pub ? `已分享 v${pub.version_seq}` : ""}>
-        发布{#if stale}<span class="count">&nbsp;有更新</span>{:else if pub}<span class="dot ok"></span>{/if}
-      </a>
-    </nav>
+    {#if active === "workbench"}
+      <span class="title" aria-current="page" title={report.title}>{report.title}</span>
+    {:else}
+      <a class="title" href="/app/r/{report.id}" title="回到正文">{report.title}</a>
+    {/if}
+    <a
+      class="badge vlink"
+      href="/app/r/{report.id}/history"
+      title="版本历史"
+      class:active={active === "history"}
+      aria-current={active === "history" ? "page" : undefined}>v{report.current_seq}</a
+    >
   {/if}
   <span class="spacer"></span>
+  {#if report}
+    {#if report.active_round?.status === "verifying"}
+      <a class="verify-chip" href="/app/r/{report.id}/verify" class:active={active === "verify"}>
+        第 {report.active_round.seq} 轮待验证{#if verifyCount > 0}&nbsp;· {verifyCount}{/if}
+      </a>
+    {/if}
+    <a
+      class="pub-btn"
+      href="/app/r/{report.id}/publish"
+      class:active={active === "publish"}
+      title={stale ? `分享的是 v${pub?.version_seq}，当前 v${report.current_seq}` : pub ? `已分享 v${pub.version_seq}` : ""}
+    >
+      发布{#if stale}<span class="stale">&nbsp;· 有更新</span>{/if}
+    </a>
+  {/if}
   {@render children?.()}
 </header>

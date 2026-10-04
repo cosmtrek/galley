@@ -67,10 +67,13 @@
   );
   const submittable = $derived(comments.filter((c) => c.status === "draft" || c.status === "open").length);
   const drafts = $derived(statusCounts.get("draft") ?? 0);
+  const unresolvedActive = $derived(filter === "unresolved" || STATUS_ORDER.includes(filter as CommentStatus));
+  const subVisible = $derived(
+    STATUS_ORDER.filter((s) => (statusCounts.get(s) ?? 0) > 0).length >= 2 ||
+      STATUS_ORDER.includes(filter as CommentStatus),
+  );
   const round = $derived<Round | null>(report?.active_round ?? null);
-  const roundBusy = $derived(round !== null);
   let roundOpen = $state(false);
-  let roundEl = $state<HTMLElement | null>(null);
   let now = $state(Date.now());
 
   function ago(ms: number | null) {
@@ -246,7 +249,6 @@
   });
 
   function onDocMouseDown(e: MouseEvent) {
-    if (roundOpen && roundEl && !roundEl.contains(e.target as Node)) roundOpen = false;
     if (!pop || !popEl || popEl.contains(e.target as Node)) return;
     // An unsaved comment survives stray clicks; starting a new one asks first.
     if (pop.kind === "compose" && composerDirty) return;
@@ -504,51 +506,11 @@
 <svelte:window onkeydown={onKeydown} />
 <svelte:document onmousedown={onDocMouseDown} />
 
-<TopBar {report} active="workbench">
-  {#if report && archived}
-    <span class="muted small">已归档，只读</span>
-    <a class="small" href="/app/r/{id}/publish">恢复 →</a>
-  {:else if report}
-    {#if round}
-      <div class="round-status" bind:this={roundEl}>
-        {#if round.status === "verifying"}
-          <a class="round-chip verifying" href="/app/r/{id}/verify">第 {round.seq} 轮待验证 →</a>
-        {:else}
-          <button
-            class="round-chip"
-            aria-expanded={roundOpen}
-            title={round.status === "processing" && round.claimed_at ? `已认领 ${ago(round.claimed_at)}` : ""}
-            onclick={() => (roundOpen = !roundOpen)}
-          >
-            <span class="dot" class:busy={round.status === "processing"}></span>
-            第 {round.seq} 轮 · {round.status === "submitted" ? "等待 AI" : "AI 处理中"}
-          </button>
-          {#if roundOpen}
-            <div class="round-pop" role="dialog" aria-label="本轮状态">
-              <div class="small">
-                {round.comment_count} 条评论 · 提交于 {ago(round.submitted_at)}{#if round.claimed_at} · 已认领 {ago(round.claimed_at)}{/if}
-              </div>
-              {#if round.status === "submitted"}
-                <PromptBox {report} {round} />
-              {:else}
-                <div class="muted small">AI 正在修改，完成后这里会变成「待验证」。期间可以继续写下一轮的草稿评论。</div>
-              {/if}
-            </div>
-          {/if}
-        {/if}
-      </div>
-    {/if}
-    <div class="seg" role="group" aria-label="模式">
-      <button class:on={mode === "read"} aria-pressed={mode === "read"} title="阅读模式（M 切换）" onclick={() => setMode("read")}>阅读</button>
-      <button class:on={mode === "comment"} aria-pressed={mode === "comment"} title="评论模式（M 切换）" onclick={() => setMode("comment")}>评论</button>
-    </div>
-    <button class="primary" disabled={submittable === 0 || roundBusy || submitting} onclick={submitRound}
-      title={round ? `第 ${round.seq} 轮结束后才能提交下一轮` : ""}>
-      提交本轮{#if submittable && !roundBusy}（{submittable}）{/if}
-    </button>
-  {/if}
-</TopBar>
+<TopBar {report} active="workbench" />
 
+{#if report && archived}
+  <div class="banner">已归档，只读。<a href="/app/r/{id}/publish">恢复 →</a></div>
+{/if}
 {#if error}<div class="banner attention">{error}</div>{/if}
 
 {#if version && report}
@@ -598,27 +560,37 @@
     {#if commenting}
       <aside class="sidebar" aria-label="评论">
         <div class="sidebar-head">
-          <div class="filters" role="tablist" aria-label="按状态筛选">
-            <button role="tab" aria-selected={filter === "unresolved"} class:on={filter === "unresolved"} onclick={() => setFilter("unresolved")}>
-              未解决 <span class="n">{unresolvedCount}</span>
+          <div class="head-row">
+            <span class="head-title">评论</span>
+            <span class="spacer"></span>
+            <button class="quiet" onclick={() => startSection(null)}>＋ 整篇评论</button>
+            <button class="quiet" title="收起评论栏，进入阅读模式（M）" onclick={() => setMode("read")}>收起</button>
+          </div>
+          <div class="utabs compact" role="tablist" aria-label="按状态筛选">
+            <button role="tab" aria-selected={unresolvedActive} class:on={unresolvedActive} onclick={() => setFilter("unresolved")}>
+              未解决 {unresolvedCount}
             </button>
-            {#each STATUS_ORDER as s (s)}
-              {#if statusCounts.get(s) || filter === s}
-                <button role="tab" aria-selected={filter === s} class:on={filter === s} onclick={() => setFilter(s)}>
-                  {STATUS_LABEL[s]} <span class="n">{statusCounts.get(s) ?? 0}</span>
-                </button>
-              {/if}
-            {/each}
             <button role="tab" aria-selected={filter === "resolved"} class:on={filter === "resolved"} onclick={() => setFilter("resolved")}>
-              已解决 <span class="n">{statusCounts.get("resolved") ?? 0}</span>
+              已解决 {statusCounts.get("resolved") ?? 0}
             </button>
             <button role="tab" aria-selected={filter === "all"} class:on={filter === "all"} onclick={() => setFilter("all")}>
-              全部 <span class="n">{comments.length}</span>
+              全部 {comments.length}
             </button>
           </div>
         </div>
-        <div class="batchbar">
-          {#if pickableShown.length}
+        {#if subVisible}
+          <div class="substatus">
+            {#each STATUS_ORDER as s (s)}
+              {#if statusCounts.get(s) || filter === s}
+                <button class:on={filter === s} onclick={() => setFilter(filter === s ? "unresolved" : s)}>
+                  {STATUS_LABEL[s]} {statusCounts.get(s) ?? 0}
+                </button>
+              {/if}
+            {/each}
+          </div>
+        {/if}
+        {#if pickableShown.length}
+          <div class="batchbar">
             <label class="all">
               <input type="checkbox" bind:this={allBox} checked={allPicked} onchange={toggleAll} />
               {picked.size ? `已选 ${picked.size}` : "全选"}
@@ -629,10 +601,8 @@
             {#if toDelete.length}
               <button disabled={batchBusy} onclick={batchDelete}>删除草稿（{toDelete.length}）</button>
             {/if}
-          {/if}
-          <span class="spacer"></span>
-          <button class="quiet" onclick={() => startSection(null)}>整篇评论</button>
-        </div>
+          </div>
+        {/if}
         <div class="sidebar-body">
           {#each shown as c (c.id)}
             <CommentCard
@@ -656,17 +626,59 @@
             </div>
           {/each}
         </div>
+        {#if round || submittable > 0}
+          <div class="sidebar-foot">
+            {#if round}
+              {#if round.status === "verifying"}
+                <div class="foot-line">
+                  <span class="dot ok"></span>第 {round.seq} 轮已处理完
+                  <span class="spacer"></span>
+                  <a class="primary-btn" href="/app/r/{id}/verify">去验证 →</a>
+                </div>
+              {:else}
+                <div class="foot-line">
+                  <span class="dot" class:busy={round.status === "processing"}></span>
+                  第 {round.seq} 轮 · {round.status === "submitted" ? "等待 AI" : "AI 处理中"}
+                  {#if round.status === "submitted"}
+                    <span class="spacer"></span>
+                    <button class="link small" aria-expanded={roundOpen} onclick={() => (roundOpen = !roundOpen)}>给 AI 的指令</button>
+                  {/if}
+                </div>
+                <div class="muted small">
+                  {round.comment_count} 条评论 · 提交于 {ago(round.submitted_at)}{#if round.claimed_at} · 已认领 {ago(round.claimed_at)}{/if}
+                </div>
+                {#if round.status === "submitted"}
+                  {#if roundOpen}<PromptBox {report} {round} />{/if}
+                {:else}
+                  <div class="muted small">AI 正在修改，完成后这里会变成「待验证」。期间可以继续写下一轮的草稿评论。</div>
+                {/if}
+                {#if drafts}<div class="muted small">已有 {drafts} 条草稿，本轮结束后可提交</div>{/if}
+              {/if}
+            {:else}
+              <div class="foot-line">
+                <span class="muted small">{drafts} 条草稿{submittable > drafts ? `，${submittable - drafts} 条待处理` : ""}</span>
+                <span class="spacer"></span>
+                <button class="primary" disabled={submitting} onclick={submitRound}>提交本轮（{submittable}）</button>
+              </div>
+            {/if}
+          </div>
+        {/if}
       </aside>
     {:else}
       <aside class="rail" aria-label="评论概况">
-        <button class="rail-btn" title="切换到评论模式（M）" onclick={() => setMode("comment")}>
+        <button class="rail-btn" title="切换到评论模式（M）" disabled={archived} onclick={() => setMode("comment")}>
           <span class="rail-item"><b>{unresolvedCount}</b>未解决</span>
           {#each STATUS_ORDER as s (s)}
             {#if statusCounts.get(s)}
               <span class="rail-item s-{s}"><b>{statusCounts.get(s)}</b>{STATUS_LABEL[s]}</span>
             {/if}
           {/each}
-          <span class="rail-go">展开</span>
+          {#if round}
+            <span class="rail-item round"><b>第{round.seq}轮</b><span class:accent={round.status === "verifying"}>{round.status === "verifying" ? "待验证" : round.status === "processing" ? "处理中" : "等待AI"}</span></span>
+          {:else if submittable > 0}
+            <span class="rail-item"><b>{submittable}</b>待提交</span>
+          {/if}
+          {#if !archived}<span class="rail-go">展开</span>{/if}
         </button>
       </aside>
     {/if}
