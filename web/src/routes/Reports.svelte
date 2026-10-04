@@ -2,7 +2,7 @@
   import { onDestroy, onMount, tick } from "svelte";
   import { get, post } from "../lib/api";
   import { copyText } from "../lib/clipboard";
-  import { fmtAgo, fmtTime, ROUND_LABEL } from "../lib/format";
+  import { fmtAgo, fmtTime } from "../lib/format";
   import { navigate } from "../lib/router.svelte";
   import type { ReportInfo } from "../lib/types";
   import TopBar from "../components/TopBar.svelte";
@@ -142,22 +142,17 @@
     }
   }
 
-  /** How the share link relates to the current draft, if there is one. */
-  function share(r: ReportInfo): { text: string; stale: boolean } | null {
-    const p = r.publication;
-    if (!p) return null;
-    if (p.version_id !== r.current_version_id) return { text: `分享的是 v${p.version_seq}，当前 v${r.current_seq}`, stale: true };
-    return { text: `已分享 v${p.version_seq} · 打开 ${p.views} 次`, stale: false };
-  }
-
-  /** One sentence per report: what, if anything, the owner should do next. */
-  function status(r: ReportInfo): { text: string; tone: "verify" | "wait" | "todo" | "" } {
+  /** Right-hand action shown only when the report needs the owner's attention. */
+  type RowAction = { kind: "verify"; n: number } | { kind: "wait" } | { kind: "todo"; text: string };
+  function actionOf(r: ReportInfo): RowAction | null {
     const ar = r.active_round;
-    if (ar?.status === "verifying") return { text: `第 ${ar.seq} 轮 · ${ROUND_LABEL.verifying} ${r.counts.verify} 条`, tone: "verify" };
-    if (ar) return { text: `第 ${ar.seq} 轮 · ${ROUND_LABEL[ar.status]}`, tone: "wait" };
-    const pending = r.counts.draft + r.counts.open + r.counts.clarify;
-    if (pending) return { text: `${pending} 条评论待交给 AI`, tone: "todo" };
-    return { text: "没有待处理", tone: "" };
+    if (ar?.status === "verifying") return { kind: "verify", n: r.counts.verify };
+    if (ar) return { kind: "wait" };
+    const n = r.counts.draft + r.counts.open;
+    const c = r.counts.clarify;
+    if (n > 0) return { kind: "todo", text: `${n + c} 条评论未提交` };
+    if (c > 0) return { kind: "todo", text: `${c} 条需要你回复` };
+    return null;
   }
 
   // Poll while there is something live to wait for: agent's first connection on the
@@ -192,6 +187,17 @@
     {#each received as r (r.id)}
       <p class="small received">✓ 已收到「{r.title}」 <a href="/app/r/{r.id}">打开</a></p>
     {/each}
+  {/if}
+{/snippet}
+
+{#snippet sharePart(r: ReportInfo)}
+  {@const p = r.publication}
+  {#if p}
+    {#if p.version_id === r.current_version_id}
+      {" · 已分享"}
+    {:else}
+      {" · "}<span class="stale" title="读者看到的是 v{p.version_seq}">分享待更新</span>
+    {/if}
   {/if}
 {/snippet}
 
@@ -291,7 +297,7 @@
       <button class="link" onclick={() => openDialog("ai", true)}>接入方法</button>
     </p>
     {#if archived.length > 0}
-      <div class="utabs">
+      <div class="utabs list-tabs">
         <button class:on={filter === "all"} onclick={() => setFilter("all")}>全部 {active.length}</button>
         <button class:on={filter === "archived"} onclick={() => setFilter("archived")}>已归档 {archived.length}</button>
       </div>
@@ -301,18 +307,16 @@
     {:else if filter === "archived"}
       <ul class="reports">
         {#each archived as r (r.id)}
-          {@const sh = share(r)}
           <li>
             <div class="report-row muted-row">
-              <a class="report-main" href="/app/r/{r.id}">
-                <div class="report-title">{r.title}</div>
-                <div class="muted small report-meta">
-                  <span>v{r.current_seq}</span>
-                  <span>· 归档于 {fmtTime(r.archived_at)}</span>
-                  {#if sh}<span>· {sh.text}</span>{/if}
+              <div class="report-main">
+                <div class="report-head">
+                  <a class="report-title" href="/app/r/{r.id}">{r.title}</a>
+                  <button class="small" onclick={() => unarchive(r)}>恢复</button>
                 </div>
-              </a>
-              <button class="small" onclick={() => unarchive(r)}>恢复</button>
+                {#if r.summary}<div class="muted small clamp">{r.summary}</div>{/if}
+                <div class="muted report-meta">归档于 {fmtTime(r.archived_at)} · v{r.current_seq}{@render sharePart(r)}</div>
+              </div>
             </div>
           </li>
         {/each}
@@ -320,21 +324,24 @@
     {:else}
       <ul class="reports">
         {#each active as r (r.id)}
-          {@const s = status(r)}
-          {@const sh = share(r)}
+          {@const a = actionOf(r)}
           <li>
-            <a class="report-row bar-{s.tone || "none"}" href="/app/r/{r.id}">
+            <div class="report-row">
               <div class="report-main">
-                <div class="report-title">{r.title}</div>
-                {#if r.summary}<div class="muted small clamp">{r.summary}</div>{/if}
-                <div class="muted small report-meta">
-                  <span>v{r.current_seq}</span>
-                  <span>· {fmtTime(r.updated_at)}</span>
-                  {#if sh}<span class:stale={sh.stale}>· {sh.text}</span>{/if}
+                <div class="report-head">
+                  <a class="report-title" href="/app/r/{r.id}">{r.title}</a>
+                  {#if a?.kind === "verify"}
+                    <a class="act-tag" href="/app/r/{r.id}/verify">待验证 {a.n} 条 ›</a>
+                  {:else if a?.kind === "wait"}
+                    <span class="act-wait">⟳ 等待 AI</span>
+                  {:else if a?.kind === "todo"}
+                    <span class="act-todo">{a.text}</span>
+                  {/if}
                 </div>
+                {#if r.summary}<div class="muted small clamp">{r.summary}</div>{/if}
+                <div class="muted report-meta">{fmtTime(r.updated_at)} · v{r.current_seq}{@render sharePart(r)}</div>
               </div>
-              <div class="report-status tone-{s.tone}">{s.text}</div>
-            </a>
+            </div>
           </li>
         {/each}
       </ul>
