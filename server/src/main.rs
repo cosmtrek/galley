@@ -124,13 +124,26 @@ fn load_secret(data_dir: &std::path::Path, key: &str, env: &str) -> String {
     }
     let value = db::random_token();
     secrets.insert(key.to_string(), value.clone().into());
-    let _ = std::fs::write(&path, serde_json::to_string_pretty(&secrets).unwrap_or_default());
+    let _ = write_private(&path, serde_json::to_string_pretty(&secrets).unwrap_or_default().as_bytes());
+    value
+}
+
+/// Restricts permissions before any bytes are written so the secrets are never readable by others.
+fn write_private(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        opts.mode(0o600);
+        let file = opts.open(path)?;
+        // `mode` only applies on creation; an existing file keeps its old permissions otherwise.
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        return (&file).write_all(contents);
     }
-    value
+    #[cfg(not(unix))]
+    opts.open(path)?.write_all(contents)
 }
 
 #[tokio::main]

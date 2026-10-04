@@ -4,3 +4,7 @@
 /data/
 *.db
 secrets.json
+.env
+.env.*
+*.db-*
+*.log

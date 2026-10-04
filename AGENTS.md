@@ -1,6 +1,6 @@
 # Galley
 
-AI 报告的批注、修订、验证与发布工具。Rust 单文件服务（axum + SQLite），内嵌 Svelte 5 工作台。功能、接口和运行方式见 [README](README.md)；产品与技术方案原文在 `/root/ryos/projects/galley/`（`README.md`、`architecture.md`）。
+AI 报告的批注、修订、验证与发布工具。Rust 单文件服务（axum + SQLite），内嵌 Svelte 5 工作台。功能、接口和运行方式见 [README](README.md)。
 
 ## 沟通
 
