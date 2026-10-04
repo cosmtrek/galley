@@ -88,3 +88,19 @@ export function truncate(s: string, n = 60): string {
   const chars = Array.from(s);
   return chars.length > n ? chars.slice(0, n).join("") + "…" : s;
 }
+
+/** Document-order sort key for a comment against the current version's blocks. */
+export function commentPosition(a: Anchor, blockIndex: Map<string, number>): [number, number] {
+  const idx = (id: string) => blockIndex.get(id) ?? Infinity;
+  switch (a.type) {
+    case "document":
+      return [-1, 0];
+    case "section":
+      return [idx(a.section_id), -1];
+    case "block":
+    case "cell":
+      return [idx(a.block_id), 0];
+    case "text":
+      return [idx(a.block_id), a.start];
+  }
+}

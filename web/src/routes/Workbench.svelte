@@ -4,7 +4,7 @@
   import { computePosition, flip, offset, shift } from "@floating-ui/dom";
   import { api, get, post } from "../lib/api";
   import { anchorToRange, scopeFor, selectionToAnchor } from "../lib/anchor";
-  import { STATUS_LABEL, truncate } from "../lib/format";
+  import { commentPosition, STATUS_LABEL, truncate } from "../lib/format";
   import type { Anchor, Comment, CommentStatus, ReportInfo, Round, Version } from "../lib/types";
   import PromptBox from "../components/PromptBox.svelte";
   import TopBar from "../components/TopBar.svelte";
@@ -15,7 +15,9 @@
   let { id }: { id: string } = $props();
 
   type Mode = "read" | "comment";
-  type Filter = "unresolved" | "all" | CommentStatus;
+  type Filter = "unresolved" | "resolved" | "all";
+  type GroupKey = "mine" | "agent" | "draft" | "resolved";
+  type Group = { key: GroupKey; label: string; items: Comment[] };
   type Ref = { getBoundingClientRect(): DOMRect };
   type Popover =
     | { kind: "compose"; anchor: Anchor; label: string | null; ref: Ref; range: Range | null }
@@ -43,7 +45,6 @@
   let paperEl = $state<HTMLElement | null>(null);
   let titleEl = $state<HTMLElement | null>(null);
   let popEl = $state<HTMLElement | null>(null);
-  let allBox = $state<HTMLInputElement | null>(null);
   let ranges = new Map<string, Range>();
   let poll: ReturnType<typeof setInterval> | undefined;
 
@@ -60,18 +61,39 @@
     return m;
   });
   const unresolvedCount = $derived(comments.length - (statusCounts.get("resolved") ?? 0));
+  const blockIndex = $derived(new Map((version?.doc.blocks ?? []).map((b, i) => [b.id, i])));
   const shown = $derived(
-    comments.filter((c) =>
-      filter === "all" ? true : filter === "unresolved" ? c.status !== "resolved" : c.status === filter,
-    ),
+    comments
+      .filter((c) => (filter === "all" ? true : filter === "unresolved" ? c.status !== "resolved" : c.status === "resolved"))
+      .sort((a, b) => {
+        const [pa, sa] = commentPosition(a.anchor, blockIndex);
+        const [pb, sb] = commentPosition(b.anchor, blockIndex);
+        if (pa !== pb) return pa < pb ? -1 : 1;
+        return sa - sb || a.created_at - b.created_at;
+      }),
   );
+  const groupOf = (c: Comment): GroupKey =>
+    c.status === "verify" || c.status === "clarify" || c.status === "orphaned"
+      ? "mine"
+      : c.status === "open"
+        ? "agent"
+        : c.status === "draft"
+          ? "draft"
+          : "resolved";
+  const GROUPS: { key: GroupKey; label: string }[] = [
+    { key: "mine", label: "需要我处理" },
+    { key: "agent", label: "等 AI 处理" },
+    { key: "draft", label: "草稿" },
+    { key: "resolved", label: "已解决" },
+  ];
+  const groups = $derived<Group[]>(
+    filter === "resolved"
+      ? []
+      : GROUPS.map((g) => ({ ...g, items: shown.filter((c) => groupOf(c) === g.key) })).filter((g) => g.items.length),
+  );
+  let resolvedOpen = $state(false);
   const submittable = $derived(comments.filter((c) => c.status === "draft" || c.status === "open").length);
   const drafts = $derived(statusCounts.get("draft") ?? 0);
-  const unresolvedActive = $derived(filter === "unresolved" || STATUS_ORDER.includes(filter as CommentStatus));
-  const subVisible = $derived(
-    STATUS_ORDER.filter((s) => (statusCounts.get(s) ?? 0) > 0).length >= 2 ||
-      STATUS_ORDER.includes(filter as CommentStatus),
-  );
   const round = $derived<Round | null>(report?.active_round ?? null);
   let roundOpen = $state(false);
   let now = $state(Date.now());
@@ -93,15 +115,9 @@
   const canResolve = (c: Comment) => c.status === "verify" || c.status === "clarify" || c.status === "orphaned";
   const canDelete = (c: Comment) => c.status === "draft";
   const pickableComment = (c: Comment) => canResolve(c) || canDelete(c);
-  const pickableShown = $derived(shown.filter(pickableComment));
   const pickedComments = $derived(comments.filter((c) => picked.has(c.id)));
   const toResolve = $derived(pickedComments.filter(canResolve));
   const toDelete = $derived(pickedComments.filter(canDelete));
-  const allPicked = $derived(pickableShown.length > 0 && pickableShown.every((c) => picked.has(c.id)));
-
-  $effect(() => {
-    if (allBox) allBox.indeterminate = picked.size > 0 && !allPicked;
-  });
 
   // Picks must not outlive a status change that makes the comment ineligible.
   $effect(() => {
@@ -112,11 +128,6 @@
   function setFilter(f: Filter) {
     filter = f;
     picked.clear();
-  }
-
-  function toggleAll() {
-    if (allPicked) picked.clear();
-    else for (const c of pickableShown) picked.add(c.id);
   }
 
   async function runBatch(list: Comment[], fn: (c: Comment) => Promise<unknown>) {
@@ -137,6 +148,11 @@
     if (!list.length) return;
     const clarify = list.filter((c) => c.status === "clarify").length;
     if (clarify && !confirm(`其中 ${clarify} 条是 AI 提出的疑问，还没有回复。仍然全部解决？`)) return;
+    runBatch(list, (c) => post(`/api/comments/${c.id}/resolve`));
+  }
+
+  function resolveVerified(list: Comment[]) {
+    if (!list.length || !confirm(`解决 ${list.length} 条待验证评论？`)) return;
     runBatch(list, (c) => post(`/api/comments/${c.id}/resolve`));
   }
 
@@ -558,7 +574,7 @@
     </div>
 
     {#if commenting}
-      <aside class="sidebar" aria-label="评论">
+      <aside class="sidebar" class:picking={picked.size > 0} aria-label="评论">
         <div class="sidebar-head">
           <div class="head-row">
             <span class="head-title">评论</span>
@@ -567,7 +583,7 @@
             <button class="quiet" title="收起评论栏，进入阅读模式（M）" onclick={() => setMode("read")}>收起</button>
           </div>
           <div class="utabs compact" role="tablist" aria-label="按状态筛选">
-            <button role="tab" aria-selected={unresolvedActive} class:on={unresolvedActive} onclick={() => setFilter("unresolved")}>
+            <button role="tab" aria-selected={filter === "unresolved"} class:on={filter === "unresolved"} onclick={() => setFilter("unresolved")}>
               未解决 {unresolvedCount}
             </button>
             <button role="tab" aria-selected={filter === "resolved"} class:on={filter === "resolved"} onclick={() => setFilter("resolved")}>
@@ -578,33 +594,21 @@
             </button>
           </div>
         </div>
-        {#if subVisible}
-          <div class="substatus">
-            {#each STATUS_ORDER as s (s)}
-              {#if statusCounts.get(s) || filter === s}
-                <button class:on={filter === s} onclick={() => setFilter(filter === s ? "unresolved" : s)}>
-                  {STATUS_LABEL[s]} {statusCounts.get(s) ?? 0}
-                </button>
-              {/if}
-            {/each}
-          </div>
-        {/if}
-        {#if pickableShown.length}
+        {#if picked.size > 0}
           <div class="batchbar">
-            <label class="all">
-              <input type="checkbox" bind:this={allBox} checked={allPicked} onchange={toggleAll} />
-              {picked.size ? `已选 ${picked.size}` : "全选"}
-            </label>
+            <span class="muted small">已选 {picked.size}</span>
             {#if toResolve.length}
               <button class="primary" disabled={batchBusy} onclick={batchResolve}>解决（{toResolve.length}）</button>
             {/if}
             {#if toDelete.length}
               <button disabled={batchBusy} onclick={batchDelete}>删除草稿（{toDelete.length}）</button>
             {/if}
+            <span class="spacer"></span>
+            <button class="quiet" onclick={() => picked.clear()}>取消</button>
           </div>
         {/if}
         <div class="sidebar-body">
-          {#each shown as c (c.id)}
+          {#snippet card(c: Comment)}
             <CommentCard
               comment={c}
               active={c.id === activeId}
@@ -616,15 +620,45 @@
               onselect={() => focusComment(c.id)}
               onchanged={load}
             />
+          {/snippet}
+          {#if filter === "resolved"}
+            {#each shown as c (c.id)}
+              {@render card(c)}
+            {:else}
+              <div class="empty">这个筛选下没有评论。</div>
+            {/each}
           {:else}
-            <div class="empty">
-              {#if comments.length}
-                这个筛选下没有评论。
+            {#each groups as g (g.key)}
+              {@const verifyList = g.key === "mine" ? g.items.filter((c) => c.status === "verify") : []}
+              {#if g.key === "resolved"}
+                <button class="group-head toggle" aria-expanded={resolvedOpen} onclick={() => (resolvedOpen = !resolvedOpen)}>
+                  <span>{resolvedOpen ? "▾" : "▸"} {g.label} · {g.items.length}</span>
+                </button>
               {:else}
-                选中正文文字，评论框会直接出现在鼠标下方；鼠标移到段落左侧点「＋」评论整段；在左侧大纲评论整章。
+                <div class="group-head">
+                  <span>{g.label} · {g.items.length}</span>
+                  {#if g.key === "draft"}<span class="faint">下一轮提交</span>{/if}
+                  <span class="spacer"></span>
+                  {#if verifyList.length}
+                    <button class="link small" disabled={batchBusy} onclick={() => resolveVerified(verifyList)}>全部解决（{verifyList.length}）</button>
+                  {/if}
+                </div>
               {/if}
-            </div>
-          {/each}
+              {#if g.key !== "resolved" || resolvedOpen}
+                {#each g.items as c (c.id)}
+                  {@render card(c)}
+                {/each}
+              {/if}
+            {:else}
+              <div class="empty">
+                {#if comments.length}
+                  这个筛选下没有评论。
+                {:else}
+                  选中正文文字，评论框会直接出现在鼠标下方；鼠标移到段落左侧点「＋」评论整段；在左侧大纲评论整章。
+                {/if}
+              </div>
+            {/each}
+          {/if}
         </div>
         {#if round || submittable > 0}
           <div class="sidebar-foot">
