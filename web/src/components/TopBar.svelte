@@ -32,8 +32,8 @@
   {/if}
   <span class="spacer"></span>
   {#if report}
-    {#if report.active_round?.status === "verifying"}
-      <a class="verify-chip" href="/app/r/{report.id}/verify" class:active={active === "verify"}>
+    {#if report.active_round?.status === "verifying" && active !== "workbench"}
+      <a class="verify-chip" href="/app/r/{report.id}">
         第 {report.active_round.seq} 轮待验证{#if verifyCount > 0}&nbsp;· {verifyCount}{/if}
       </a>
     {/if}

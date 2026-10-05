@@ -1,19 +1,12 @@
-import type { Anchor, Block, BlockChange, BlockKind, CommentStatus, RoundStatus } from "./types";
+import type { Anchor, Block, BlockChange, BlockKind, CommentStatus } from "./types";
 
 export const STATUS_LABEL: Record<CommentStatus, string> = {
-  draft: "未提交",
-  open: "待处理",
+  draft: "草稿",
+  open: "等 AI 处理",
   clarify: "待澄清",
   verify: "待验证",
   resolved: "已解决",
   orphaned: "已失效",
-};
-
-export const ROUND_LABEL: Record<RoundStatus, string> = {
-  submitted: "已提交，等待 AI",
-  processing: "AI 处理中",
-  verifying: "待验证",
-  done: "已完成",
 };
 
 export const ACTION_LABEL: Record<string, string> = {

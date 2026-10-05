@@ -5,9 +5,9 @@
   import Login from "./routes/Login.svelte";
   import Reports from "./routes/Reports.svelte";
   import Workbench from "./routes/Workbench.svelte";
-  import Verify from "./routes/Verify.svelte";
   import History from "./routes/History.svelte";
   import Publish from "./routes/Publish.svelte";
+  import ConfirmDialog from "./components/ConfirmDialog.svelte";
 
   let auth = $state<"checking" | "in" | "out">("checking");
 
@@ -33,12 +33,11 @@
   <Reports />
 {:else if route.name === "workbench"}
   {#key route.id}<Workbench id={route.id} />{/key}
-{:else if route.name === "verify"}
-  {#key route.id + (route.round ?? "")}<Verify id={route.id} roundId={route.round} />{/key}
 {:else if route.name === "history"}
   {#key route.id}<History id={route.id} />{/key}
 {:else if route.name === "publish"}
   {#key route.id}<Publish id={route.id} />{/key}
 {:else}
-  <div class="page"><h1>页面不存在</h1><a href="/app">返回报告列表</a></div>
+  <div class="page"><h1>页面不存在</h1><a href="/app">返回报告列表 →</a></div>
 {/if}
+<ConfirmDialog />

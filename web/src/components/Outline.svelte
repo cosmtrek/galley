@@ -48,7 +48,7 @@
       >
         <span class="t">{h.text}</span>
         {#if editable}
-          <button class="add" title="评论本章节" onclick={(e) => { e.stopPropagation(); onadd(h.id); }}>＋</button>
+          <button class="add" title="评论整章" onclick={(e) => { e.stopPropagation(); onadd(h.id); }}>＋</button>
           <span class="count" class:zero={!counts.get(h.id)}>{counts.get(h.id) ?? 0}</span>
         {/if}
       </div></li>

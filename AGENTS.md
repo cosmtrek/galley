@@ -47,3 +47,13 @@ cd server && cargo test && cargo build --release
 - 遵循周边代码：Rust 2024 edition；前端 Svelte 5 runes + TypeScript strict，样式写在 `web/src/styles/` 下的全局 CSS，沿用已有的 CSS 变量。
 - 界面文案用中文，代码、标识符和注释用英文。
 - 注释只写代码本身看不出的原因（隐藏约束、浏览器怪癖、不变量）。
+
+## 界面约定
+
+- 按钮三级：`primary`（红色实心，一个区域最多一个，表示「轮到你处理」）、次要（默认边框或 `quiet`）、`danger`（红色描边，不可撤销的操作）。小号用 `sm`。`button.link` 是灰色带下划线的文字链接，不用红色。
+- 操作行用 `.actions`：靠右，次要在前、主操作在最右；「取消」用 `quiet`。
+- 红色只用于需要用户处理的状态（待验证色条、主按钮、待验证标签），计数、图标、选中态不用红色；选中态统一用 `--bg-active`。
+- 确认用 `lib/confirm.svelte.ts` 的 `ask()`，不用原生 `confirm` / `alert` / `prompt`。只有不可撤销或批量的操作才确认。操作失败的提示显示在操作所在的区域。
+- 复制用 `CopyButton`；评论类输入一律用 `Composer`（Enter 发送、Shift+Enter 换行、Esc 取消）。
+- 字号只用 `--fs-xs/sm/md/lg/xl`，颜色只用 CSS 变量，不写行内样式（动态定位除外）。
+- 用词：状态名与分组名一致（草稿、等 AI 处理、待验证……）；「恢复」只指取消归档，「回退」指回到旧版本，「改回去」指撤掉 AI 的额外改动，「停用」指作废分享链接；跳转箭头用「→」；完整句子结尾带句号。

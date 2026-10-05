@@ -3,20 +3,18 @@
 export type Route =
   | { name: "reports" }
   | { name: "workbench"; id: string }
-  | { name: "verify"; id: string; round: string | null }
   | { name: "history"; id: string }
   | { name: "publish"; id: string }
   | { name: "notfound" };
 
-function parse(pathname: string, search: string): Route {
+function parse(pathname: string): Route {
   const p = pathname.replace(/\/+$/, "");
   if (p === "/app" || p === "") return { name: "reports" };
+  // `verify` was a page of its own; old links land on the workbench, which now verifies in its sidebar.
   const m = p.match(/^\/app\/r\/([^/]+)(?:\/(verify|history|publish))?$/);
   if (!m) return { name: "notfound" };
   const id = decodeURIComponent(m[1]);
   switch (m[2]) {
-    case "verify":
-      return { name: "verify", id, round: new URLSearchParams(search).get("round") };
     case "history":
       return { name: "history", id };
     case "publish":
@@ -26,7 +24,7 @@ function parse(pathname: string, search: string): Route {
   }
 }
 
-export const router = $state({ route: parse(location.pathname, location.search), hash: location.hash });
+export const router = $state({ route: parse(location.pathname), hash: location.hash });
 
 export function navigate(href: string) {
   history.pushState({}, "", href);
@@ -35,7 +33,7 @@ export function navigate(href: string) {
 }
 
 function sync() {
-  router.route = parse(location.pathname, location.search);
+  router.route = parse(location.pathname);
   router.hash = location.hash;
 }
 

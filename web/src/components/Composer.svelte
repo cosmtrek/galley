@@ -7,6 +7,7 @@
     quote = null,
     initialBody = "",
     saveLabel = "保存",
+    allowEmpty = false,
     placeholder = "想怎么改，一句话说清楚。比如：这个数字请核实并补来源；全文类似的说法都改掉",
     dirty = $bindable(false),
     onsave,
@@ -16,6 +17,8 @@
     quote?: string | null;
     initialBody?: string;
     saveLabel?: string;
+    /** Reopening takes an optional reason, so an empty body may be saved. */
+    allowEmpty?: boolean;
     placeholder?: string;
     dirty?: boolean;
     onsave: (body: string) => Promise<void>;
@@ -35,7 +38,7 @@
   });
 
   async function save() {
-    if (!body.trim() || busy) return;
+    if ((!allowEmpty && !body.trim()) || busy) return;
     busy = true;
     error = "";
     try {
@@ -53,6 +56,8 @@
       e.preventDefault();
       save();
     } else if (e.key === "Escape") {
+      // Otherwise the same keypress also closes the confirm dialog that cancelling may open.
+      e.preventDefault();
       oncancel();
     }
   }
@@ -65,11 +70,9 @@
     </div>
   {/if}
   <textarea bind:this={textarea} bind:value={body} onkeydown={keydown} {placeholder} rows="2"></textarea>
-  <div class="row">
-    <span class="muted small">Enter 保存 · Shift+Enter 换行</span>
-    <span class="spacer"></span>
-    {#if error}<span class="error small">{error}</span>{/if}
-    <button class="quiet" onclick={oncancel}>取消</button>
-    <button class="primary" disabled={!body.trim() || busy} onclick={save}>{saveLabel}</button>
+  {#if error}<p class="error small">{error}</p>{/if}
+  <div class="actions">
+    <button class="quiet sm" onclick={oncancel}>取消</button>
+    <button class="primary sm" disabled={(!allowEmpty && !body.trim()) || busy} onclick={save}>{saveLabel}</button>
   </div>
 </div>

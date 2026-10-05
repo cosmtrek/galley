@@ -3,9 +3,12 @@
   import { SvelteSet } from "svelte/reactivity";
   import { computePosition, flip, offset, shift } from "@floating-ui/dom";
   import { api, get, post } from "../lib/api";
+  import { ask, confirmState } from "../lib/confirm.svelte";
   import { anchorToRange, scopeFor, selectionToAnchor } from "../lib/anchor";
-  import { commentPosition, STATUS_LABEL, truncate } from "../lib/format";
-  import type { Anchor, Comment, CommentStatus, ReportInfo, Round, Version } from "../lib/types";
+  import { commentPosition, fmtAgo, STATUS_LABEL, truncate } from "../lib/format";
+  import { diffCtx, partner, withoutPartners, type DiffCtx } from "../lib/diffctx";
+  import type { Anchor, Comment, CommentStatus, ExtraChange, ReportInfo, Review, ReviewItem, Round, Version } from "../lib/types";
+  import ChangeView from "../components/ChangeView.svelte";
   import PromptBox from "../components/PromptBox.svelte";
   import TopBar from "../components/TopBar.svelte";
   import Outline from "../components/Outline.svelte";
@@ -15,8 +18,7 @@
   let { id }: { id: string } = $props();
 
   type Mode = "read" | "comment";
-  type Filter = "unresolved" | "resolved" | "all";
-  type GroupKey = "mine" | "agent" | "draft" | "resolved";
+  type GroupKey = "mine" | "extra" | "agent" | "draft" | "resolved";
   type Group = { key: GroupKey; label: string; items: Comment[] };
   type Ref = { getBoundingClientRect(): DOMRect };
   type Popover =
@@ -32,7 +34,6 @@
   let comments = $state<Comment[]>([]);
   let error = $state("");
   let mode = $state<Mode>(localStorage.getItem(MODE_KEY) === "read" ? "read" : "comment");
-  let filter = $state<Filter>("unresolved");
   let activeId = $state<string | null>(null);
   let pop = $state.raw<Popover | null>(null);
   let composerDirty = $state(false);
@@ -64,7 +65,7 @@
   const blockIndex = $derived(new Map((version?.doc.blocks ?? []).map((b, i) => [b.id, i])));
   const shown = $derived(
     comments
-      .filter((c) => (filter === "all" ? true : filter === "unresolved" ? c.status !== "resolved" : c.status === "resolved"))
+      .slice()
       .sort((a, b) => {
         const [pa, sa] = commentPosition(a.anchor, blockIndex);
         const [pb, sb] = commentPosition(b.anchor, blockIndex);
@@ -82,29 +83,100 @@
           : "resolved";
   const GROUPS: { key: GroupKey; label: string }[] = [
     { key: "mine", label: "需要我处理" },
+    { key: "extra", label: "评论之外的改动" },
     { key: "agent", label: "等 AI 处理" },
     { key: "draft", label: "草稿" },
     { key: "resolved", label: "已解决" },
   ];
   const groups = $derived<Group[]>(
-    filter === "resolved"
-      ? []
-      : GROUPS.map((g) => ({ ...g, items: shown.filter((c) => groupOf(c) === g.key) })).filter((g) => g.items.length),
+    GROUPS.map((g) => ({ ...g, items: shown.filter((c) => groupOf(c) === g.key) })).filter(
+      (g) => g.items.length || (g.key === "extra" && extraPending.length),
+    ),
   );
   let resolvedOpen = $state(false);
   const submittable = $derived(comments.filter((c) => c.status === "draft" || c.status === "open").length);
-  const drafts = $derived(statusCounts.get("draft") ?? 0);
   const round = $derived<Round | null>(report?.active_round ?? null);
-  let roundOpen = $state(false);
-  let now = $state(Date.now());
 
-  function ago(ms: number | null) {
-    if (!ms) return "";
-    const min = Math.floor((now - ms) / 60000);
-    if (min < 1) return "刚刚";
-    if (min < 60) return `${min} 分钟前`;
-    return `${Math.floor(min / 60)} 小时前`;
+  // ----- round under verification: what changed -----
+
+  let review = $state<Review | null>(null);
+  let ctx = $state<DiffCtx | null>(null);
+  // A string key, so reloading the report does not refetch an unchanged round.
+  const verifyKey = $derived(
+    round?.status === "verifying" ? [round.id, round.base_version_id, round.result_version_id ?? ""].join("|") : "",
+  );
+  $effect(() => {
+    const key = verifyKey;
+    review = null;
+    ctx = null;
+    if (!key) return;
+    const [rid, base, result] = key.split("|");
+    let stale = false;
+    Promise.all([
+      get<Review>(`/api/rounds/${rid}/review`),
+      result ? diffCtx(base, result).catch(() => null) : Promise.resolve(null),
+    ])
+      .then(([r, c]) => {
+        if (stale) return;
+        review = r;
+        ctx = c;
+      })
+      .catch(() => {});
+    return () => (stale = true);
+  });
+  const reviewOf = $derived(new Map<string, ReviewItem>((review?.items ?? []).map((it) => [it.comment.id, it])));
+  const verifyCount = $derived(statusCounts.get("verify") ?? 0);
+
+  const extraAll = $derived<ExtraChange[]>(round?.status === "verifying" ? round.extra_changes : []);
+  const extraPending = $derived(withoutPartners(ctx, extraAll).filter((e) => !e.confirmed));
+  const sectionTitle = (sid: string) => review?.section_titles[sid] ?? titles.get(sid) ?? "开头";
+
+  // A replacement is displayed as one item, so acting on it covers both halves.
+  function pairIds(ch: ExtraChange) {
+    const p = partner(ctx, ch);
+    return [ch.block_id, ...(p && extraAll.some((e) => e.block_id === p.block_id && !e.confirmed) ? [p.block_id] : [])];
   }
+  const revertBody = (ch: ExtraChange) =>
+    partner(ctx, ch) || ch.op === "modified" || ch.op === "moved"
+      ? "请恢复为修改前的内容。"
+      : ch.op === "added"
+        ? "这段是新增的，我不需要，请删掉。"
+        : "这段被删掉了，请恢复。";
+
+  async function runExtra(fn: (rid: string) => Promise<unknown>) {
+    if (!round) return;
+    batchBusy = true;
+    actionError = "";
+    try {
+      await fn(round.id);
+    } catch (e) {
+      actionError = (e as Error).message;
+    } finally {
+      batchBusy = false;
+      await load();
+    }
+  }
+  const confirmExtra = (ch: ExtraChange) =>
+    runExtra(async (rid) => {
+      for (const b of pairIds(ch)) await post(`/api/rounds/${rid}/extra/confirm`, { block_id: b });
+    });
+  async function confirmAllExtra() {
+    const n = extraPending.length;
+    if (await ask({ title: `确认全部 ${n} 处评论之外的改动？`, message: "确认后这些改动会保留在报告里。", confirmLabel: "全部确认" }))
+      runExtra((rid) => post(`/api/rounds/${rid}/extra/confirm`, {}));
+  }
+  // The draft comment it creates shows up under 草稿, where it can still be edited before submitting.
+  const revertExtra = (ch: ExtraChange) =>
+    runExtra((rid) => post(`/api/rounds/${rid}/extra/revert`, { block_ids: pairIds(ch), body: revertBody(ch) }));
+
+  function focusExtra(ch: ExtraChange) {
+    const target = ch.op === "deleted" ? (partner(ctx, ch)?.block_id ?? ch.after) : ch.block_id;
+    if (target) articleEl?.querySelector(`[data-block="${target}"]`)?.scrollIntoView({ block: "center" });
+  }
+  let now = $state(Date.now());
+  let actionError = $state("");
+  // Reading `now` makes the relative times refresh on the poll tick.
+  const ago = (ms: number | null) => (void now, ms ? fmtAgo(ms) : "");
 
   const popComment = $derived(
     pop?.kind === "view" ? (comments.find((c) => c.id === (pop as { commentId: string }).commentId) ?? null) : null,
@@ -125,17 +197,13 @@
     for (const pid of [...picked]) if (!valid.has(pid)) picked.delete(pid);
   });
 
-  function setFilter(f: Filter) {
-    filter = f;
-    picked.clear();
-  }
-
   async function runBatch(list: Comment[], fn: (c: Comment) => Promise<unknown>) {
     batchBusy = true;
+    actionError = "";
     try {
       for (const c of list) await fn(c);
     } catch (e) {
-      alert((e as Error).message);
+      actionError = (e as Error).message;
     } finally {
       picked.clear();
       batchBusy = false;
@@ -143,23 +211,22 @@
     }
   }
 
-  function batchResolve() {
-    const list = toResolve;
+  async function resolveMany(list: Comment[]) {
     if (!list.length) return;
     const clarify = list.filter((c) => c.status === "clarify").length;
-    if (clarify && !confirm(`其中 ${clarify} 条是 AI 提出的疑问，还没有回复。仍然全部解决？`)) return;
-    runBatch(list, (c) => post(`/api/comments/${c.id}/resolve`));
+    const ok = await ask({
+      title: `解决 ${list.length} 条评论？`,
+      message: clarify ? `其中 ${clarify} 条是 AI 提出的疑问，还没有回复。` : undefined,
+      confirmLabel: "解决",
+    });
+    if (ok) runBatch(list, (c) => post(`/api/comments/${c.id}/resolve`));
   }
 
-  function resolveVerified(list: Comment[]) {
-    if (!list.length || !confirm(`解决 ${list.length} 条待验证评论？`)) return;
-    runBatch(list, (c) => post(`/api/comments/${c.id}/resolve`));
-  }
-
-  function batchDelete() {
+  async function batchDelete() {
     const list = toDelete;
-    if (!list.length || !confirm(`删除 ${list.length} 条草稿评论？`)) return;
-    runBatch(list, (c) => api("DELETE", `/api/comments/${c.id}`));
+    if (!list.length) return;
+    if (await ask({ title: `删除 ${list.length} 条草稿评论？`, message: "删除后无法恢复。", confirmLabel: "删除", danger: true }))
+      runBatch(list, (c) => api("DELETE", `/api/comments/${c.id}`));
   }
 
   // ----- loading -----
@@ -199,9 +266,9 @@
 
   // ----- modes -----
 
-  function setMode(m: Mode) {
+  async function setMode(m: Mode) {
     if (m === mode) return;
-    if (!closePopover()) return;
+    if (!(await closePopover())) return;
     mode = m;
     localStorage.setItem(MODE_KEY, m);
     gutter = null;
@@ -214,29 +281,34 @@
   }
 
   function onKeydown(e: KeyboardEvent) {
-    if (e.metaKey || e.ctrlKey || e.altKey || editableTarget(e.target)) return;
+    // While the confirm dialog is open, Escape belongs to it.
+    if (e.metaKey || e.ctrlKey || e.altKey || confirmState.current || editableTarget(e.target)) return;
     if (e.key === "m" || e.key === "M") {
       e.preventDefault();
       setMode(mode === "read" ? "comment" : "read");
-    } else if (e.key === "Escape" && roundOpen) {
-      roundOpen = false;
     } else if (e.key === "Escape" && pop) {
+      e.preventDefault();
       closePopover();
     }
   }
 
   // ----- popover -----
 
-  /** Returns false when the user chose to keep an unsaved comment. */
-  function closePopover(): boolean {
-    if (pop?.kind === "compose" && composerDirty && !confirm("放弃这条还没保存的评论？")) return false;
+  /** Resolves false when the user chose to keep an unsaved comment. */
+  async function closePopover(): Promise<boolean> {
+    if (
+      pop?.kind === "compose" &&
+      composerDirty &&
+      !(await ask({ title: "放弃这条还没保存的评论？", confirmLabel: "放弃", danger: true }))
+    )
+      return false;
     pop = null;
     composerDirty = false;
     return true;
   }
 
-  function openPopover(p: Popover): boolean {
-    if (!closePopover()) return false;
+  async function openPopover(p: Popover): Promise<boolean> {
+    if (!(await closePopover())) return false;
     pop = p;
     return true;
   }
@@ -320,17 +392,17 @@
           c.anchor.type === "cell"
             ? `[data-block="${c.anchor.block_id}"] [data-cell="${c.anchor.row},${c.anchor.col}"]`
             : `[data-block="${c.anchor.block_id}"]`;
-        rules.push(`.paper .report ${sel}{background-color:rgba(192,57,43,${on ? 0.16 : 0.06})}`);
+        rules.push(`.paper .report ${sel}{background-color:color-mix(in srgb,var(--accent) ${on ? 16 : 6}%,transparent)}`);
       } else if (c.anchor.type === "section") {
         rules.push(
-          `.paper .report [data-block="${c.anchor.section_id}"]::after{content:" ●";color:#c0392b;font-size:.55em;vertical-align:middle${on ? ";background:rgba(192,57,43,.2)" : ""}}`,
+          `.paper .report [data-block="${c.anchor.section_id}"]::after{content:" ●";color:var(--accent);font-size:.55em;vertical-align:middle${on ? ";background:color-mix(in srgb,var(--accent) 20%,transparent)" : ""}}`,
         );
       }
     }
     if (pop?.kind === "compose") {
       const a = pop.anchor;
       const target = a.type === "block" ? a.block_id : a.type === "section" ? a.section_id : null;
-      if (target) rules.push(`.paper .report [data-block="${target}"]{outline:2px solid rgba(192,57,43,.35);outline-offset:4px}`);
+      if (target) rules.push(`.paper .report [data-block="${target}"]{outline:2px solid color-mix(in srgb,var(--accent) 35%,transparent);outline-offset:4px}`);
     }
     return `<style>${rules.join("\n")}</style>`;
   });
@@ -354,13 +426,13 @@
   function onArticleMouseUp(e: MouseEvent) {
     if (!commenting) return;
     const { clientX, clientY } = e;
-    setTimeout(() => {
+    setTimeout(async () => {
       if (!articleEl) return;
       const sel = getSelection();
       const a = selectionToAnchor(sel, articleEl);
       if (!a || !sel) return;
       const range = sel.getRangeAt(0).cloneRange();
-      const ok = openPopover({
+      const ok = await openPopover({
         kind: "compose",
         anchor: a,
         label: null,
@@ -372,12 +444,12 @@
     }, 0);
   }
 
-  function startBlock(blockId: string, heading: boolean) {
+  async function startBlock(blockId: string, heading: boolean) {
     const b = version?.doc.blocks.find((x) => x.id === blockId);
     const el = articleEl?.querySelector<HTMLElement>(`[data-block="${blockId}"]`);
     if (!el) return;
     const anchor: Anchor = heading ? { type: "section", section_id: blockId } : { type: "block", block_id: blockId };
-    const ok = openPopover({
+    const ok = await openPopover({
       kind: "compose",
       anchor,
       label: heading ? `评论整章「${truncate(b?.text ?? "", 24)}」` : "评论整段",
@@ -387,8 +459,8 @@
     if (ok) activeId = null;
   }
 
-  function startSection(sectionId: string | null) {
-    if (mode !== "comment") setMode("comment");
+  async function startSection(sectionId: string | null) {
+    if (mode !== "comment") await setMode("comment");
     if (sectionId !== null) {
       articleEl?.querySelector(`[data-block="${sectionId}"]`)?.scrollIntoView({ block: "center" });
       startBlock(sectionId, true);
@@ -396,7 +468,7 @@
     }
     if (!titleEl) return;
     titleEl.scrollIntoView({ block: "center" });
-    if (openPopover({ kind: "compose", anchor: { type: "document" }, label: "评论整篇报告", ref: titleEl, range: null }))
+    if (await openPopover({ kind: "compose", anchor: { type: "document" }, label: "整篇评论", ref: titleEl, range: null }))
       activeId = null;
   }
 
@@ -473,15 +545,15 @@
   }
 
   async function showInline(cid: string, ref: Ref) {
-    if (!openPopover({ kind: "view", commentId: cid, ref })) return;
+    if (!(await openPopover({ kind: "view", commentId: cid, ref }))) return;
     activeId = cid;
     await tick();
     document.getElementById(`card-${cid}`)?.scrollIntoView({ block: "nearest" });
   }
 
   /** Sidebar click: bring the commented text into view and mark it. */
-  function focusComment(cid: string) {
-    if (!closePopover()) return;
+  async function focusComment(cid: string) {
+    if (!(await closePopover())) return;
     activeId = cid;
     const c = comments.find((x) => x.id === cid);
     if (!c || !current(c) || !articleEl) return;
@@ -502,17 +574,13 @@
   }
 
   async function submitRound() {
-    const open = submittable - drafts;
-    const msg = `提交第 ${(report?.round_count ?? 0) + 1} 轮：${drafts} 条新评论${open ? `，${open} 条重新打开/待处理` : ""}。提交后 AI 才能看到，草稿将不可再编辑。`;
-    if (!confirm(msg)) return;
     submitting = true;
+    actionError = "";
     try {
       await post(`/api/reports/${id}/rounds`);
       await load();
-      // The user's next step is telling their AI tool, so put the prompt right in front of them.
-      roundOpen = true;
     } catch (e) {
-      alert((e as Error).message);
+      actionError = (e as Error).message;
     } finally {
       submitting = false;
     }
@@ -525,7 +593,7 @@
 <TopBar {report} active="workbench" />
 
 {#if report && archived}
-  <div class="banner">已归档，只读。<a href="/app/r/{id}/publish">恢复 →</a></div>
+  <div class="banner">已归档，只读。<a href="/app/r/{id}/publish">到发布页恢复 →</a></div>
 {/if}
 {#if error}<div class="banner attention">{error}</div>{/if}
 
@@ -544,8 +612,8 @@
       {#if commenting && gutter}
         <button
           class="gutter-add"
-          style="top: {gutter.top + 4}px; left: 18px"
-          title={gutter.heading ? "评论本章节" : "评论整段"}
+          style="top: {gutter.top + 4}px"
+          title={gutter.heading ? "评论整章" : "评论整段"}
           onclick={() => gutter && startBlock(gutter.blockId, gutter.heading)}>＋</button>
       {/if}
       {#if pop}
@@ -565,6 +633,9 @@
               inline
               sectionTitle={popComment.section_id ? titles.get(popComment.section_id) : null}
               block={anchorBlock(popComment)}
+              review={reviewOf.get(popComment.id)}
+              {ctx}
+              reportId={id}
               onselect={() => {}}
               onchanged={load}
             />
@@ -576,35 +647,23 @@
     {#if commenting}
       <aside class="sidebar" class:picking={picked.size > 0} aria-label="评论">
         <div class="sidebar-head">
-          <div class="head-row">
-            <span class="head-title">评论</span>
-            <span class="spacer"></span>
-            <button class="quiet" onclick={() => startSection(null)}>＋ 整篇评论</button>
-            <button class="quiet" title="收起评论栏，进入阅读模式（M）" onclick={() => setMode("read")}>收起</button>
-          </div>
-          <div class="utabs compact" role="tablist" aria-label="按状态筛选">
-            <button role="tab" aria-selected={filter === "unresolved"} class:on={filter === "unresolved"} onclick={() => setFilter("unresolved")}>
-              未解决 {unresolvedCount}
-            </button>
-            <button role="tab" aria-selected={filter === "resolved"} class:on={filter === "resolved"} onclick={() => setFilter("resolved")}>
-              已解决 {statusCounts.get("resolved") ?? 0}
-            </button>
-            <button role="tab" aria-selected={filter === "all"} class:on={filter === "all"} onclick={() => setFilter("all")}>
-              全部 {comments.length}
-            </button>
-          </div>
+          <span class="head-title">评论</span>
+          <span class="muted">{comments.length}</span>
+          <span class="spacer"></span>
+          <button class="quiet sm" onclick={() => startSection(null)}>＋ 整篇评论</button>
+          <button class="quiet sm" title="收起评论栏，进入阅读模式（M）" onclick={() => setMode("read")}>收起</button>
         </div>
         {#if picked.size > 0}
           <div class="batchbar">
-            <span class="muted small">已选 {picked.size}</span>
-            {#if toResolve.length}
-              <button class="primary" disabled={batchBusy} onclick={batchResolve}>解决（{toResolve.length}）</button>
-            {/if}
-            {#if toDelete.length}
-              <button disabled={batchBusy} onclick={batchDelete}>删除草稿（{toDelete.length}）</button>
-            {/if}
+            <span class="muted small">已选 {picked.size} 条</span>
             <span class="spacer"></span>
-            <button class="quiet" onclick={() => picked.clear()}>取消</button>
+            <button class="quiet sm" onclick={() => picked.clear()}>取消</button>
+            {#if toDelete.length}
+              <button class="danger sm" disabled={batchBusy} onclick={batchDelete}>删除草稿</button>
+            {/if}
+            {#if toResolve.length}
+              <button class="primary sm" disabled={batchBusy} onclick={() => resolveMany(toResolve)}>解决</button>
+            {/if}
           </div>
         {/if}
         <div class="sidebar-body">
@@ -614,6 +673,9 @@
               active={c.id === activeId}
               sectionTitle={c.section_id ? titles.get(c.section_id) : null}
               block={anchorBlock(c)}
+              review={reviewOf.get(c.id)}
+              {ctx}
+              reportId={id}
               pickable={pickableComment(c)}
               picked={picked.has(c.id)}
               onpick={(on) => (on ? picked.add(c.id) : picked.delete(c.id))}
@@ -621,26 +683,42 @@
               onchanged={load}
             />
           {/snippet}
-          {#if filter === "resolved"}
-            {#each shown as c (c.id)}
-              {@render card(c)}
-            {:else}
-              <div class="empty">这个筛选下没有评论。</div>
-            {/each}
-          {:else}
-            {#each groups as g (g.key)}
+          {#each groups as g (g.key)}
               {@const verifyList = g.key === "mine" ? g.items.filter((c) => c.status === "verify") : []}
               {#if g.key === "resolved"}
                 <button class="group-head toggle" aria-expanded={resolvedOpen} onclick={() => (resolvedOpen = !resolvedOpen)}>
-                  <span>{resolvedOpen ? "▾" : "▸"} {g.label} · {g.items.length}</span>
+                  <span>{resolvedOpen ? "▼" : "▶"} {g.label} · {g.items.length}</span>
                 </button>
+              {:else if g.key === "extra"}
+                <div class="group-head">
+                  <span>{g.label} · {extraPending.length}</span>
+                  <span class="spacer"></span>
+                  <button class="link" disabled={batchBusy} onclick={confirmAllExtra}>全部确认</button>
+                </div>
+                {#each extraPending as ch (ch.op + ch.block_id)}
+                  <div
+                    class="card s-extra"
+                    role="button"
+                    tabindex="0"
+                    onclick={() => focusExtra(ch)}
+                    onkeydown={(e) => e.key === "Enter" && e.target === e.currentTarget && focusExtra(ch)}
+                  >
+                    <div class="card-loc">{sectionTitle(ch.section_id)}</div>
+                    <div class="card-change"><ChangeView change={ch} {ctx} showOp={ch.op !== "modified"} /></div>
+                    <div class="card-foot mine" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="presentation">
+                      <span class="card-status">待确认</span>
+                      <span class="spacer"></span>
+                      <button class="quiet sm" disabled={batchBusy} title="生成一条草稿评论，随下一轮交给 AI 改回去" onclick={() => revertExtra(ch)}>改回去</button>
+                      <button class="primary sm" disabled={batchBusy} onclick={() => confirmExtra(ch)}>确认</button>
+                    </div>
+                  </div>
+                {/each}
               {:else}
                 <div class="group-head">
                   <span>{g.label} · {g.items.length}</span>
-                  {#if g.key === "draft"}<span class="faint">下一轮提交</span>{/if}
                   <span class="spacer"></span>
-                  {#if verifyList.length}
-                    <button class="link small" disabled={batchBusy} onclick={() => resolveVerified(verifyList)}>全部解决（{verifyList.length}）</button>
+                  {#if verifyList.length > 1}
+                    <button class="link" disabled={batchBusy} onclick={() => resolveMany(verifyList)}>全部解决</button>
                   {/if}
                 </div>
               {/if}
@@ -649,50 +727,53 @@
                   {@render card(c)}
                 {/each}
               {/if}
-            {:else}
-              <div class="empty">
-                {#if comments.length}
-                  这个筛选下没有评论。
-                {:else}
-                  选中正文文字，评论框会直接出现在鼠标下方；鼠标移到段落左侧点「＋」评论整段；在左侧大纲评论整章。
-                {/if}
-              </div>
-            {/each}
-          {/if}
+          {:else}
+            <div class="empty">
+              选中正文文字即可评论；鼠标移到段落左侧点「＋」评论整段；在左侧大纲评论整章。
+            </div>
+          {/each}
         </div>
-        {#if round || submittable > 0}
+        {#if round || submittable > 0 || actionError}
           <div class="sidebar-foot">
+            {#if actionError}
+              <p class="error small">
+                <span class="spacer">{actionError}</span>
+                <button class="link" onclick={() => (actionError = "")}>知道了</button>
+              </p>
+            {/if}
             {#if round}
               {#if round.status === "verifying"}
                 <div class="foot-line">
-                  <span class="dot ok"></span>第 {round.seq} 轮已处理完
-                  <span class="spacer"></span>
-                  <a class="primary-btn" href="/app/r/{id}/verify">去验证 →</a>
+                  <span class="dot ok"></span>
+                  第 {round.seq} 轮 · {verifyCount
+                    ? `${verifyCount} 条待验证`
+                    : extraPending.length
+                      ? `还有 ${extraPending.length} 处评论之外的改动待确认`
+                      : "处理完毕"}
                 </div>
+                {#if round.summary}
+                  <div class="ai-summary"><span class="muted">AI 摘要：</span>{round.summary}</div>
+                {/if}
               {:else}
                 <div class="foot-line">
-                  <span class="dot" class:busy={round.status === "processing"}></span>
+                  <span class="dot {round.status === 'processing' ? 'ok' : 'warn'}"></span>
                   第 {round.seq} 轮 · {round.status === "submitted" ? "等待 AI" : "AI 处理中"}
-                  {#if round.status === "submitted"}
-                    <span class="spacer"></span>
-                    <button class="link small" aria-expanded={roundOpen} onclick={() => (roundOpen = !roundOpen)}>给 AI 的指令</button>
-                  {/if}
-                </div>
-                <div class="muted small">
-                  {round.comment_count} 条评论 · 提交于 {ago(round.submitted_at)}{#if round.claimed_at} · 已认领 {ago(round.claimed_at)}{/if}
+                  <span class="spacer"></span>
+                  <span class="muted small">
+                    {round.comment_count} 条评论 · {round.claimed_at ? `${ago(round.claimed_at)}认领` : `${ago(round.submitted_at)}提交`}
+                  </span>
                 </div>
                 {#if round.status === "submitted"}
-                  {#if roundOpen}<PromptBox {report} {round} />{/if}
+                  <PromptBox {report} {round} />
                 {:else}
-                  <div class="muted small">AI 正在修改，完成后这里会变成「待验证」。期间可以继续写下一轮的草稿评论。</div>
+                  <div class="muted small">AI 正在修改，期间可以继续写下一轮的草稿评论。</div>
                 {/if}
-                {#if drafts}<div class="muted small">已有 {drafts} 条草稿，本轮结束后可提交</div>{/if}
               {/if}
-            {:else}
+            {:else if submittable > 0}
               <div class="foot-line">
-                <span class="muted small">{drafts} 条草稿{submittable > drafts ? `，${submittable - drafts} 条待处理` : ""}</span>
+                <span>{submittable} 条评论待提交</span>
                 <span class="spacer"></span>
-                <button class="primary" disabled={submitting} onclick={submitRound}>提交本轮（{submittable}）</button>
+                <button class="primary" disabled={submitting} onclick={submitRound}>提交本轮</button>
               </div>
             {/if}
           </div>
@@ -708,7 +789,7 @@
             {/if}
           {/each}
           {#if round}
-            <span class="rail-item round"><b>第{round.seq}轮</b><span class:accent={round.status === "verifying"}>{round.status === "verifying" ? "待验证" : round.status === "processing" ? "处理中" : "等待AI"}</span></span>
+            <span class="rail-item round"><b>第{round.seq}轮</b><span class:accent={round.status === "verifying"}>{round.status === "verifying" ? "待验证" : round.status === "processing" ? "处理中" : "等待 AI"}</span></span>
           {:else if submittable > 0}
             <span class="rail-item"><b>{submittable}</b>待提交</span>
           {/if}

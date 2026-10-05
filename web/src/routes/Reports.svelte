@@ -1,12 +1,12 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from "svelte";
   import { get, post } from "../lib/api";
-  import { copyText } from "../lib/clipboard";
   import { fmtAgo, fmtTime } from "../lib/format";
   import { navigate } from "../lib/router.svelte";
   import type { ReportInfo } from "../lib/types";
   import TopBar from "../components/TopBar.svelte";
   import AgentConnect from "../components/AgentConnect.svelte";
+  import CopyButton from "../components/CopyButton.svelte";
   import example from "../../../examples/energy-storage-2026.md?raw";
 
   interface Meta {
@@ -31,7 +31,6 @@
   let addOpen = $state(false);
   let addTab = $state<"ai" | "manual">("ai");
   let setupOpen = $state(false);
-  let promptCopied = $state<"" | "ok" | "fail">("");
   // Ids present when the dialog opened; anything newer arrived from the agent.
   let knownIds = new Set<string>();
   const received = $derived(addOpen ? (reports ?? []).filter((r) => !knownIds.has(r.id)) : []);
@@ -64,7 +63,6 @@
     addTab = tab;
     setupOpen = setup;
     error = "";
-    promptCopied = "";
     knownIds = new Set((reports ?? []).map((r) => r.id));
     addOpen = true;
     await tick();
@@ -81,11 +79,6 @@
     }
   }
 
-  async function copyPrompt() {
-    promptCopied = (await copyText(PROMPT)) ? "ok" : "fail";
-    setTimeout(() => (promptCopied = ""), 2000);
-  }
-
   function startExample() {
     markdown = example;
     fileName = "示例报告";
@@ -95,11 +88,11 @@
   async function readFile(file: File | undefined): Promise<boolean> {
     if (!file) return false;
     if (!/\.(md|markdown|txt)$/i.test(file.name)) {
-      error = `「${file.name}」不是 Markdown 文件，请选择 .md 文件`;
+      error = `「${file.name}」不是 Markdown 文件，请选择 .md 文件。`;
       return false;
     }
     if (file.size > 5 * 1024 * 1024) {
-      error = "文件超过 5 MB，请确认选的是报告正文";
+      error = "文件超过 5 MB，请确认选的是报告正文。";
       return false;
     }
     markdown = await file.text();
@@ -150,7 +143,7 @@
     if (ar) return { kind: "wait" };
     const n = r.counts.draft + r.counts.open;
     const c = r.counts.clarify;
-    if (n > 0) return { kind: "todo", text: `${n + c} 条评论未提交` };
+    if (n > 0) return { kind: "todo", text: `${n + c} 条评论待提交` };
     if (c > 0) return { kind: "todo", text: `${c} 条需要你回复` };
     return null;
   }
@@ -175,17 +168,16 @@
 {#snippet promptRow()}
   <div class="prompt-row">
     <span class="prompt">{PROMPT}</span>
-    <button class="primary" onclick={copyPrompt}>{promptCopied === "ok" ? "已复制" : "复制"}</button>
+    <CopyButton text={PROMPT} />
   </div>
-  {#if promptCopied === "fail"}<p class="muted small">复制失败，请选中后手动复制</p>{/if}
 {/snippet}
 
 {#snippet receivedArea()}
   {#if received.length === 0}
-    <p class="muted small">⟳ 等待 AI 发来报告…</p>
+    <p class="muted small"><span class="dot warn"></span> 等待 AI 发来报告…</p>
   {:else}
     {#each received as r (r.id)}
-      <p class="small received">✓ 已收到「{r.title}」 <a href="/app/r/{r.id}">打开</a></p>
+      <p class="small received"><span class="dot ok"></span> 已收到「{r.title}」 <a href="/app/r/{r.id}">打开 →</a></p>
     {/each}
   {/if}
 {/snippet}
@@ -207,7 +199,7 @@
       <div class="step-block">
         <p class="small step">
           <b>① 接入 AI</b>
-          <span class="muted">⟳ 等待连接…</span>
+          <span class="muted"><span class="dot warn"></span> 等待连接…</span>
         </p>
         <div><AgentConnect {publicUrl} {token} /></div>
       </div>
@@ -222,7 +214,7 @@
     </div>
   {:else}
     <div class="sec">
-      {#if inline}<p class="muted small">✓ 已连接 · 最近 {fmtAgo(lastSeen)}</p>{/if}
+      {#if inline}<p class="muted small"><span class="dot ok"></span> 最近连接 {fmtAgo(lastSeen)}</p>{/if}
       <p class="small">在 AI 工具里说：</p>
       {@render promptRow()}
       {@render receivedArea()}
@@ -241,9 +233,9 @@
     </p>
   </div>
   <textarea rows="12" bind:value={markdown} placeholder={"---\ntitle: 报告标题\nsummary: 一句话摘要\n---\n\n## 一、第一章\n\n正文……"}></textarea>
-  <div class="row">
+  <div class="actions">
+    <button class="quiet" onclick={() => dlg?.close()}>取消</button>
     <button class="primary" disabled={!markdown.trim()} onclick={create}>创建</button>
-    <button onclick={() => dlg?.close()}>取消</button>
   </div>
 {/snippet}
 
@@ -275,7 +267,7 @@
   {#if error && !addOpen}<p class="error">{error}</p>{/if}
 
   {#if reports === null}
-    <p class="muted">加载中…</p>
+    <div class="empty">加载中…</div>
   {:else if reports.length === 0}
     <div class="panel empty-start">
       <h1>还没有报告</h1>
@@ -289,10 +281,10 @@
     <div class="row list-head">
       <h1>报告</h1>
       <span class="spacer"></span>
-      <button class="primary add-btn" onclick={() => openDialog("ai")}>+ 添加报告</button>
+      <button class="primary" onclick={() => openDialog("ai")}>＋ 添加报告</button>
     </div>
     <p class="muted list-sub">
-      {active.length} 篇 · <span class="conn-dot" class:on={lastSeen !== null}></span>
+      {active.length} 篇 · <span class="dot" class:ok={lastSeen !== null}></span>
       {#if lastSeen === null}AI 从未连接{:else}AI 最近连接 {fmtAgo(lastSeen)}{/if} ·
       <button class="link" onclick={() => openDialog("ai", true)}>接入方法</button>
     </p>
@@ -303,7 +295,7 @@
       </div>
     {/if}
     {#if filter === "all" && active.length === 0}
-      <p class="muted">没有进行中的报告</p>
+      <div class="empty">没有进行中的报告。</div>
     {:else if filter === "archived"}
       <ul class="reports">
         {#each archived as r (r.id)}
@@ -312,7 +304,7 @@
               <div class="report-main">
                 <div class="report-head">
                   <a class="report-title" href="/app/r/{r.id}">{r.title}</a>
-                  <button class="small" onclick={() => unarchive(r)}>恢复</button>
+                  <button class="sm row-action" onclick={() => unarchive(r)}>恢复</button>
                 </div>
                 {#if r.summary}<div class="muted small clamp">{r.summary}</div>{/if}
                 <div class="muted report-meta">归档于 {fmtTime(r.archived_at)} · v{r.current_seq}{@render sharePart(r)}</div>
@@ -331,9 +323,9 @@
                 <div class="report-head">
                   <a class="report-title" href="/app/r/{r.id}">{r.title}</a>
                   {#if a?.kind === "verify"}
-                    <a class="act-tag" href="/app/r/{r.id}/verify">待验证 {a.n} 条 ›</a>
+                    <a class="act-tag" href="/app/r/{r.id}">待验证 {a.n} 条 →</a>
                   {:else if a?.kind === "wait"}
-                    <span class="act-wait">⟳ 等待 AI</span>
+                    <span class="act-wait"><span class="dot warn"></span>等待 AI</span>
                   {:else if a?.kind === "todo"}
                     <span class="act-todo">{a.text}</span>
                   {/if}
@@ -350,7 +342,7 @@
 </div>
 
 <dialog
-  class="add"
+  class="modal add"
   bind:this={dlg}
   onclose={() => (addOpen = false)}
   onclick={(e) => {
@@ -361,9 +353,9 @@
   ondrop={onDrop}
 >
   <div class="row dlg-head">
-    <h2 style="margin: 0">添加报告</h2>
+    <h2>添加报告</h2>
     <span class="spacer"></span>
-    <button class="quiet dlg-close" onclick={() => dlg?.close()} aria-label="关闭">✕</button>
+    <button class="quiet sm" onclick={() => dlg?.close()} aria-label="关闭">✕</button>
   </div>
   <div class="utabs dlg-tabs">
     <button class:on={addTab === "ai"} onclick={() => (addTab = "ai")}>让 AI 发过来</button>
@@ -374,14 +366,13 @@
     {#if addTab === "ai"}
       {@render aiFlow(false)}
       {#if lastSeen !== null}
-        <div class="row dlg-foot">
-          <span class="muted small"><span class="conn-dot on"></span> 最近连接 {fmtAgo(lastSeen)}</span>
-          <span class="spacer"></span>
-          <button class="link small" onclick={() => (setupOpen = !setupOpen)}>接入方法 / 换个客户端</button>
+        <div class="dlg-foot">
+          <p class="muted small"><span class="dot ok"></span> 最近连接 {fmtAgo(lastSeen)}</p>
+          <details class="small" bind:open={setupOpen}>
+            <summary>接入方法 / 换个客户端</summary>
+            <AgentConnect {publicUrl} {token} />
+          </details>
         </div>
-        {#if setupOpen}
-          <div><AgentConnect {publicUrl} {token} /></div>
-        {/if}
       {/if}
     {:else}
       {@render importForm()}

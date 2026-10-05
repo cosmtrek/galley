@@ -14,7 +14,7 @@
       await post("/api/login", { password });
       onlogin();
     } catch (e) {
-      error = e instanceof ApiError && e.status === 401 ? "密码不对" : (e as Error).message;
+      error = e instanceof ApiError && e.status === 401 ? "密码不对。" : (e as Error).message;
     } finally {
       busy = false;
     }

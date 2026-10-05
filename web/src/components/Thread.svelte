@@ -10,11 +10,7 @@
   <div class="thread">
     {#each shown as m (m.id)}
       <div class="msg" class:agent={m.author === "agent"}>
-        <span class="who">
-          {m.author === "agent" ? "AI" : "我"}{#if m.action}&nbsp;· {ACTION_LABEL[m.action] ?? m.action}{/if} · {fmtTime(m.created_at)}
-        </span>
-        {m.body}
-      </div>
+        <span class="who">{m.author === "agent" ? "AI" : "我"}{#if m.action}&nbsp;· {ACTION_LABEL[m.action] ?? m.action}{/if} · {fmtTime(m.created_at)}</span>{m.body}</div>
     {/each}
   </div>
 {/if}
