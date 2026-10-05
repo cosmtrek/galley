@@ -10,7 +10,7 @@ COPY examples/ /src/examples/
 RUN pnpm build
 
 # The server embeds web/dist at compile time, so it is built after the workbench.
-FROM rust:1.88-slim-bookworm AS server
+FROM rust:1-slim-bookworm AS server
 WORKDIR /src/server
 COPY server/ ./
 COPY web/src/styles/report.css /src/web/src/styles/report.css

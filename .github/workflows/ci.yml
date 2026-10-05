@@ -40,5 +40,5 @@ jobs:
       - name: Minimum supported Rust version
         working-directory: server
         run: |
-          rustup toolchain install 1.88 --profile minimal
-          cargo +1.88 check --locked
+          rustup toolchain install 1.99 --profile minimal
+          cargo +1.99 check --locked

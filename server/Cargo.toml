@@ -2,7 +2,7 @@
 name = "galley"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.99"
 description = "Review workbench for AI-written reports: annotate, let an agent revise, verify, publish."
 license = "MIT"
 repository = "https://github.com/cosmtrek/galley"

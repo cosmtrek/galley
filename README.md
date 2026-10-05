@@ -29,7 +29,7 @@ Open http://localhost:7860/app. Data is kept in the `galley-data` volume. To upg
 
 ### From source
 
-Requires Rust 1.88+ and Node 24 (pnpm via corepack). The UI is embedded at compile time, so build it first:
+Requires Rust 1.99+ and Node 24 (pnpm via corepack). The UI is embedded at compile time, so build it first:
 
 ```sh
 cd web && corepack pnpm install && corepack pnpm build && cd ..

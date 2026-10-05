@@ -24,7 +24,7 @@ cd web && corepack pnpm check && corepack pnpm test && corepack pnpm build
 cd server && cargo test && cargo build --release
 ```
 
-- 最低 Rust 版本是 1.88（`Cargo.toml` 的 `rust-version`，CI 会检查）；升级依赖导致要求变高时，同步改 `rust-version`、README 和 `Dockerfile` 的基础镜像。
+- 使用 Rust 最新稳定版：`Dockerfile` 用浮动的 `rust:1-slim-bookworm`，CI 用 `stable`。最低版本是 1.99（`Cargo.toml` 的 `rust-version`，CI 会检查）；跟进新的稳定版时，同步改 `rust-version`、README 和 CI 的最低版本检查。
 - 部署只提供 `Dockerfile` 和 `docker-compose.yml`（用户在本地 `docker compose up -d --build`），不发布镜像和二进制。改了构建步骤（依赖、目录、嵌入的文件）要确认 `docker build` 仍能通过。
 - 服务端快照测试用 `insta`，快照在 `server/src/snapshots/`。输出确实应变时才更新快照，并在说明里写清原因。
 - 改了工作台交互，要在真实浏览器里走一遍相关流程（选区、弹层、对话框等），不能只靠类型检查。
