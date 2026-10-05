@@ -1,0 +1,19 @@
+services:
+  galley:
+    build: .
+    restart: unless-stopped
+    ports:
+      # Bound to localhost; put a TLS reverse proxy in front before exposing it.
+      - "127.0.0.1:7860:7860"
+    environment:
+      # The address users and agents reach Galley at; share links are built from it.
+      # An https:// value also turns on secure cookies.
+      GALLEY_PUBLIC_URL: http://localhost:7860
+      # Leave unset to have a password and agent token generated into /data/secrets.json.
+      # GALLEY_PASSWORD: change-me
+      # GALLEY_AGENT_TOKEN: change-me-too
+    volumes:
+      - galley-data:/data
+
+volumes:
+  galley-data:

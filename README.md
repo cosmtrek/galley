@@ -1,127 +1,73 @@
 # Galley
 
-Galley is a review workbench for AI-written reports. You annotate a Markdown report, submit the comments as a round, an AI agent revises the report and replies to each comment, you verify the changes, and you publish a clean share link once you're done.
+Galley is a self-hosted review workbench for AI-written reports. You comment on a Markdown report the way you would on a draft, hand the comments to your AI agent in one round, check what it changed, and publish a clean read-only link when you're done.
 
-It ships as a single Rust binary. The Svelte workbench is embedded in it, and data lives in SQLite plus an assets directory.
+It is a single Rust binary with the web UI embedded; data lives in SQLite plus an assets directory. It is built for one person: one login password, plus one token for the AI agent. The UI is in Chinese.
 
-## Run
+## Features
 
-Requirements: Rust 1.85+ and Node 20+ (pnpm through corepack, or npm).
+- **Comment anywhere**: on selected text (across paragraphs too), a whole paragraph, table or diagram, a section, or the whole report.
+- **Review in rounds**: drafts go to the agent together. The agent must reply to every comment (changed, answered, or a question back) and submits the revision atomically.
+- **Verify in place**: each comment shows the agent's reply and a word-level diff. Edits no comment asked for are listed separately, to confirm or send back.
+- **Comments follow the text**: blocks are aligned across versions and anchors relocated, so comments survive edits and moves; a comment whose text is gone is flagged instead of lost.
+- **History**: compare any two versions and roll back.
+- **Publish**: a snapshot behind an unguessable link, with no comments, revision marks or JavaScript. Republishing keeps the link; revoking kills it.
+- **Diagrams**: ` ```mermaid ` and SVG blocks are rendered on the server, so they show on the share page too.
+- **Agent access** over MCP or plain HTTP, with Bearer token auth. The agent can never resolve comments.
+
+## Install
+
+### Docker
 
 ```sh
-# 1. Build the workbench. It is embedded at compile time, so build it before the server.
-cd web && corepack pnpm install && corepack pnpm build && cd ..
-
-# 2. Build and start the server.
-cd server && cargo build --release && cd ..
-GALLEY_PASSWORD=change-me ./server/target/release/galley
+git clone https://github.com/cosmtrek/galley.git && cd galley
+docker compose up -d --build
+docker compose logs galley   # the first start prints the generated password
 ```
 
-Then open http://127.0.0.1:7860/app and log in with the password.
+Open http://localhost:7860/app. Data is kept in the `galley-data` volume. To upgrade, `git pull` and run `docker compose up -d --build` again.
+
+### From source
+
+Requires Rust 1.88+ and Node 24 (pnpm via corepack). The UI is embedded at compile time, so build it first:
+
+```sh
+cd web && corepack pnpm install && corepack pnpm build && cd ..
+cd server && cargo build --release && cd ..
+./server/target/release/galley
+```
+
+### Configuration
+
+Set these as environment variables (in Docker, under `environment` in [`docker-compose.yml`](docker-compose.yml)):
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `GALLEY_ADDR` | `127.0.0.1:7860` | Listen address |
-| `GALLEY_DATA` | `./data` | SQLite database, uploaded assets, generated secrets |
-| `GALLEY_PASSWORD` | generated | Owner login password |
+| `GALLEY_PUBLIC_URL` | `http://<addr>` | Address people and agents use to reach Galley; share links are built from it. An `https://` value also enables secure cookies |
+| `GALLEY_PASSWORD` | generated | Login password |
 | `GALLEY_AGENT_TOKEN` | generated | Bearer token for the AI agent |
-| `GALLEY_PUBLIC_URL` | `http://<addr>` | Base URL used in share links; an `https://` value also enables secure cookies |
+| `GALLEY_ADDR` | `127.0.0.1:7860` (`0.0.0.0:7860` in Docker) | Listen address |
+| `GALLEY_DATA` | `./data` (`/data` in Docker) | Database, uploads and generated secrets |
 
-If the password or token is not set, Galley generates it on first start and stores it in `<data>/secrets.json` (mode 600).
+A password or token that is not set is generated on first start and saved to `<data>/secrets.json`. Galley serves plain HTTP; to reach it from other machines, put it behind a reverse proxy with TLS and set `GALLEY_PUBLIC_URL` to the `https://` address.
 
-To try it quickly, import `examples/energy-storage-2026.md` with the "导入 Markdown" button on the report list.
+## Usage
 
-## Workflow
+1. **Connect your agent.** On the report list, open "接入方法" for the exact command for Claude Code, Codex, Droid or Devin, with your token filled in. For example:
 
-1. **Annotate (批注).** Switch the workbench between reading mode and comment mode with the "阅读 | 评论" toggle or the `M` key. In comment mode, select text and a comment box opens right below the pointer; use the "＋" in the left margin to comment on a whole block, or the outline to comment on a section or the whole report. A comment is one free-form sentence. Say what you want and, if it applies beyond this spot, say so ("全文类似的说法都改掉"). Enter saves, Shift+Enter adds a line. The right sidebar lists comments by status and supports batch resolve and batch delete of drafts.
-2. **Submit the round (提交本轮).** Drafts become visible to the agent. You can keep writing drafts for the next round while the agent works.
-3. **Agent revises.** The agent claims the round, reads the packet (comments with surrounding context, plus constraints from resolved comments), and submits the full new Markdown, one reply per comment, and a summary. A reply's action is `changed`, `answered`, or `clarify`.
-4. **Verify (验证).** Verification happens in the comment sidebar. Each comment waiting under "需要我处理" shows your comment, the agent's reply, and a word-level diff of the affected block. You can resolve it, reopen it with a reason, or answer a clarify question. The agent's round summary sits at the bottom of the sidebar. Edits that no comment asked for are listed in their own group, "评论之外的改动", where you confirm each one or click "改回去" to turn it into a draft comment for the next round: the round is done only when no comment is waiting for verification and every such edit is confirmed. Anything reopened or answered goes into the next round.
-5. **History (历史).** Compare any two versions, or roll back. A rollback creates a new version.
-6. **Publish (发布).** Publishing takes a snapshot of the current version and gives it an unguessable link (`/s/<token>`). The snapshot includes its images: uploads are stored by content hash, so re-uploading a file under the same name changes later versions only. The share page serves images through its own link (`/s/<token>/a/...`), only those the published version uses, and never exposes the report id. The share page has no JavaScript and contains no comments, revision marks, or version history. It is served with `noindex` and `no-referrer` headers and a strict CSP. Republishing updates the same link. Revoking a link makes it return 410 permanently.
+   ```sh
+   claude mcp add --transport http galley http://localhost:7860/mcp \
+     --header "Authorization: Bearer <GALLEY_AGENT_TOKEN>"
+   ```
 
-Comments follow the text across versions. Galley aligns the blocks of each new version with the previous one, so blocks keep their ids through edits, moves, and renumbered headings, and text anchors are relocated by quote and context. If an anchor's text disappears, the comment is marked orphaned instead of being silently dropped. A selection may cross paragraphs; if only one end of it survives a revision, the comment narrows to that paragraph.
+   Agents without MCP can use the HTTP API: `GET /api/pending` lists rounds waiting for work, and `GET /api/rounds/<id>/packet?format=md` returns a round's comments with context and instructions. Images are uploaded with `POST /api/reports/<id>/assets?name=fig.png` (raw file as the body) and referenced as `![](assets/fig.png)`.
 
-### Diagrams
+2. **Add a report.** Ask the agent to "把这份报告发到 Galley", or use "＋ 添加报告" → "手动导入" to paste Markdown or drop a `.md` file ("填入示例报告" loads a sample).
+3. **Comment.** Select text, click "＋" in the left margin for a whole block, or use the outline for a section. Say what you want in one sentence, including whether it applies to the whole report.
+4. **Submit the round.** Click "提交本轮", then "复制指令" and paste the instruction into your agent. You can keep writing drafts for the next round meanwhile.
+5. **Verify.** When the agent is done, the sidebar shows each reply with its diff: resolve it, reopen it, or answer the agent's question. Confirm or send back edits listed under "评论之外的改动". Anything reopened goes into the next round.
+6. **Publish.** On "发布", publish the current version and share the link.
 
-Reports can contain diagrams, rendered on the server so they also show on the script-free share page:
+## License
 
-- A ` ```mermaid ` code block (flowchart, sequence, state, class, ER, gantt, pie, and more) is rendered to SVG. If it fails to parse, it stays a plain code block.
-- A ` ```svg ` code block, or a raw `<svg>…</svg>` element in the Markdown, is shown as is. Raw `<svg>` must not contain blank lines (Markdown ends an HTML block at a blank line); use the fenced form for long SVG.
-
-Diagrams are embedded as `<img>` data URIs, so SVG scripts and external resources never run. You comment on a diagram as a whole block with the "＋" in the margin.
-
-## Connecting an AI agent
-
-The agent authenticates with `Authorization: Bearer <GALLEY_AGENT_TOKEN>`. It can do everything a round needs, but it cannot resolve or reopen comments.
-
-### MCP
-
-The streamable HTTP endpoint is `POST /mcp`. For Claude Code:
-
-```sh
-claude mcp add --transport http galley http://127.0.0.1:7860/mcp \
-  --header "Authorization: Bearer $GALLEY_AGENT_TOKEN"
-```
-
-Codex reads the token from the environment at connect time:
-
-```sh
-codex mcp add galley --url http://127.0.0.1:7860/mcp --bearer-token-env-var GALLEY_AGENT_TOKEN
-```
-
-Droid:
-
-```sh
-droid mcp add galley http://127.0.0.1:7860/mcp --type http --no-oauth \
-  --header "Authorization: Bearer $GALLEY_AGENT_TOKEN"
-```
-
-The server answers plain JSON over Streamable HTTP (no SSE stream, no sessions), so `GET /mcp` returns 405.
-
-| Tool | Purpose |
-| --- | --- |
-| `galley_list_reports` | Reports and rounds waiting for the agent |
-| `galley_create_report` | Import a new Markdown report |
-| `galley_get_source` | Current Markdown source of a report |
-| `galley_get_round` | Round packet: comments, context, constraints (claims the round) |
-| `galley_submit_round` | Submit new Markdown, replies, and a summary in one atomic call |
-| `galley_push_version` | Push a new version outside a round |
-
-### HTTP
-
-```sh
-T="Authorization: Bearer $GALLEY_AGENT_TOKEN"
-curl -H "$T" $URL/api/pending                                      # what needs work
-curl -H "$T" -X POST $URL/api/rounds/<round>/claim                 # 30-minute lease
-curl -H "$T" "$URL/api/rounds/<round>/packet?format=md"            # comments + context (or JSON without format)
-curl -H "$T" "$URL/api/reports/<report>/source?format=raw"         # current Markdown
-curl -H "$T" -H 'content-type: application/json' -X POST $URL/api/rounds/<round>/result \
-  -d '{"markdown": "...", "summary": "...", "replies": [{"comment_id": "c_...", "action": "changed", "body": "..."}]}'
-```
-
-Other agent endpoints:
-
-- `POST /api/reports` with `{"markdown": "..."}` creates a report.
-- `POST /api/reports/<id>/versions` with `{"markdown": "...", "note": "..."}` pushes a version.
-- `POST /api/reports/<id>/assets?name=fig1.png` with the raw file as the body uploads an image, which the report references as `![](assets/fig1.png)`. Upload images before pushing the version that uses them: a version is rendered with the uploads that exist at that moment, and keeps them. Asset URLs under `/a/` require the owner session or the agent token.
-
-Every pending comment must get a reply, or the result is rejected. Results are applied atomically.
-
-## Development
-
-```sh
-cd server && cargo test                  # parsing, alignment, diff, anchors, state machines, HTTP + privacy
-cd web && corepack pnpm test             # anchor helpers (vitest)
-cd web && corepack pnpm check            # svelte-check
-cd web && corepack pnpm dev              # Vite dev server on :5173, proxies the API to GALLEY_BACKEND (default :7860)
-```
-
-Layout:
-
-- `server/src/doc`: Markdown to block model (pulldown-cmark, sanitized with ammonia).
-- `server/src/align.rs`, `diff.rs`, `anchor.rs`: block identity across versions, version diffs, anchor relocation.
-- `server/src/domain.rs`: round and comment state machines and role permissions.
-- `server/src/store.rs`: SQLite storage (rusqlite); `migrations/` holds the schema.
-- `server/src/api.rs`, `mcp.rs`, `share.rs`: HTTP API, MCP endpoint, public share page.
-- `web/src`: Svelte 5 workbench (routes: Reports, Workbench, History, Publish).
+[MIT](LICENSE)

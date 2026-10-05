@@ -1,0 +1,10 @@
+.git
+data
+server/target
+web/node_modules
+web/dist
+**/*.db
+**/*.db-*
+**/secrets.json
+.env
+.env.*

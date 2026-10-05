@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: corepack enable
+      - name: Workbench
+        working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm check
+          pnpm test
+          pnpm build
+
+      # The server embeds web/dist at compile time, so it is built after the workbench.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+      - name: Server
+        working-directory: server
+        run: |
+          cargo test --locked
+          cargo build --release --locked
+
+      - name: Minimum supported Rust version
+        working-directory: server
+        run: |
+          rustup toolchain install 1.88 --profile minimal
+          cargo +1.88 check --locked

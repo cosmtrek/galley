@@ -98,7 +98,7 @@ fn embedded(path: &str) -> Option<Response> {
 
 async fn spa_index() -> Response {
     embedded("index.html").unwrap_or_else(|| {
-        (StatusCode::SERVICE_UNAVAILABLE, "workbench not built: run `npm run build` in web/").into_response()
+        (StatusCode::SERVICE_UNAVAILABLE, "workbench not built: run `corepack pnpm build` in web/, then rebuild the server").into_response()
     })
 }
 
@@ -187,10 +187,28 @@ async fn main() {
     if new_password {
         println!("  password:  {} (first run only; also saved in secrets.json)", config.owner_password);
     }
-    axum::serve(listener, app(state))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await
-        .expect("server error");
+    axum::serve(listener, app(state)).with_graceful_shutdown(shutdown_signal()).await.expect("server error");
+    println!("galley stopped");
+}
+
+/// Ctrl-C locally; SIGTERM from `docker stop`, systemd and Kubernetes.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let term = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let term = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = term => {},
+    }
 }
