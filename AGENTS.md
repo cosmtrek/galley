@@ -47,7 +47,7 @@ cd server && cargo test && cargo build --release
 ## 代码风格
 
 - 遵循周边代码：Rust 2024 edition；前端 Svelte 5 runes + TypeScript strict，样式写在 `web/src/styles/` 下的全局 CSS，沿用已有的 CSS 变量。
-- 界面文案用中文，代码、标识符和注释用英文。
+- 语言：产品界面（工作台、分享页、给用户看的错误提示）和对外文档（README）用中文；代码、标识符、注释、运行日志、提交信息、LICENSE 和包元数据（`Cargo.toml`、`package.json`）用英文。
 - 注释只写代码本身看不出的原因（隐藏约束、浏览器怪癖、不变量）。
 
 ## 界面约定
