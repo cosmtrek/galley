@@ -4,6 +4,13 @@ Galley is a self-hosted review workbench for AI-written reports. You comment on 
 
 It is a single Rust binary with the web UI embedded; data lives in SQLite plus an assets directory. It is built for one person: one login password, plus one token for the AI agent. The UI is in Chinese.
 
+![Commenting on a report: select text and write what should change; drafts collect in the sidebar until you submit the round](docs/screenshots/comment.png)
+
+| Verify the agent's revision | Compare versions | Publish a clean page |
+| --- | --- | --- |
+| [![Each comment shows the agent's reply and a word-level diff, ready to resolve or reopen](docs/screenshots/verify.png)](docs/screenshots/verify.png) | [![Block-by-block comparison between two versions](docs/screenshots/history.png)](docs/screenshots/history.png) | [![The read-only share page, without comments or revision marks](docs/screenshots/share.png)](docs/screenshots/share.png) |
+| Each comment shows the agent's reply and the word-level diff; resolve or reopen it. | Compare any two versions block by block, and roll back. | Readers get a plain page with no comments, revision marks or JavaScript. |
+
 ## Features
 
 - **Comment anywhere**: on selected text (across paragraphs too), a whole paragraph, table or diagram, a section, or the whole report.
