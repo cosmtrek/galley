@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
   import type { ReportInfo } from "../lib/types";
+  import Logo from "./Logo.svelte";
 
   let {
     report = null,
@@ -14,7 +15,7 @@
 </script>
 
 <header class="topbar">
-  <a class="brand" href="/app">Galley</a>
+  <a class="brand" href="/app"><Logo />Galley</a>
   {#if report}
     <span class="muted">/</span>
     {#if active === "workbench"}

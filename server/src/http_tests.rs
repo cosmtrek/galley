@@ -259,16 +259,32 @@ async fn full_round_and_privacy() {
     assert!(headers.contains("script-src 'none'"));
     assert!(headers.contains("img-src 'self' data:"));
     assert!(headers.contains("no-referrer"));
+    assert!(html.contains(r#"<link rel="icon" href="/favicon.svg""#), "share page has no favicon");
 
     // Republishing keeps the link; revoking returns 410; unknown tokens 404.
     let (_, p2, _) = t.req("POST", &format!("/api/reports/{rid}/publications"), Who::Owner, None).await;
     assert_eq!(p2["publication"]["path"].as_str().unwrap(), path);
     let (st, _, _) = t.req("POST", &format!("/api/publications/{pid}/revoke"), Who::Owner, None).await;
     assert_eq!(st, StatusCode::NO_CONTENT);
-    let (st, _, _) = t.req("GET", &path, Who::Anon, None).await;
+    let (st, gone, _) = t.req("GET", &path, Who::Anon, None).await;
     assert_eq!(st, StatusCode::GONE);
+    assert!(gone.as_str().unwrap().contains(r#"<link rel="icon" href="/favicon.svg""#), "status page has no favicon");
     let (st, _, _) = t.req("GET", "/s/doesnotexist", Who::Anon, None).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn site_icons_are_public() {
+    let t = T::new().await;
+    for (path, mime) in [
+        ("/favicon.svg", "image/svg+xml"),
+        ("/favicon.ico", "image/x-icon"),
+        ("/apple-touch-icon.png", "image/png"),
+    ] {
+        let (st, _, headers) = t.req("GET", path, Who::Anon, None).await;
+        assert_eq!(st, StatusCode::OK, "{path}");
+        assert!(headers.contains(mime), "{path}: {headers}");
+    }
 }
 
 #[tokio::test]

@@ -83,6 +83,9 @@ details[open] > summary { margin-bottom: var(--sp-2); }
 .row { display: flex; gap: var(--sp-2); align-items: center; }
 .spacer { flex: 1; }
 .mono { font-family: var(--font-mono); font-size: var(--fs-xs); }
+/* The brand mark keeps its red dot; it is not a status color. */
+.logo { width: 1.3em; height: 1.3em; flex: none; }
+.logo circle { fill: var(--accent); }
 
 /* ---------- top bar ---------- */
 .topbar {
@@ -97,7 +100,7 @@ details[open] > summary { margin-bottom: var(--sp-2); }
   background: var(--bg);
   border-bottom: 1px solid var(--line);
 }
-.topbar .brand { font-weight: 700; text-decoration: none; letter-spacing: 0.02em; }
+.topbar .brand { display: flex; align-items: center; gap: var(--sp-1); font-weight: 700; text-decoration: none; letter-spacing: 0.02em; }
 .topbar .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40vw; }
 .topbar a.title { text-decoration: none; color: inherit; }
 .topbar a.title:hover { text-decoration: underline; }
@@ -244,7 +247,7 @@ pre.cmd { background: var(--code-bg); padding: var(--sp-3); overflow-x: auto; fo
 .empty-start p { margin: 0; }
 .empty-start .row { flex-wrap: wrap; }
 .login { max-width: 320px; margin: 18vh auto; padding: 0 var(--sp-4); }
-.login h1 { font-size: var(--fs-xl); margin-bottom: var(--sp-1); }
+.login h1 { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-xl); margin-bottom: var(--sp-1); }
 .login form { display: grid; gap: var(--sp-3); margin-top: var(--sp-5); }
 .login .hint { margin-top: var(--sp-5); line-height: 1.6; }
 

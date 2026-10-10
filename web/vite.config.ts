@@ -14,6 +14,9 @@ export default defineConfig({
       "/a": backend,
       "/s": backend,
       "/static": backend,
+      "/favicon.svg": backend,
+      "/favicon.ico": backend,
+      "/apple-touch-icon.png": backend,
     },
   },
   build: {

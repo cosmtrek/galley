@@ -1,5 +1,6 @@
 <script lang="ts">
   import { ApiError, post } from "../lib/api";
+  import Logo from "../components/Logo.svelte";
 
   let { onlogin }: { onlogin: () => void } = $props();
   let password = $state("");
@@ -22,7 +23,7 @@
 </script>
 
 <div class="login">
-  <h1>Galley</h1>
+  <h1><Logo />Galley</h1>
   <p class="muted">AI 报告的校对与发布</p>
   <form onsubmit={submit}>
     <!-- svelte-ignore a11y_autofocus -->

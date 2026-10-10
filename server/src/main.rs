@@ -36,6 +36,9 @@ struct WebDist;
 
 const REPORT_CSS: &str = include_str!("../../web/src/styles/report.css");
 const SHARE_CSS: &str = include_str!("../static/share.css");
+const FAVICON_SVG: &[u8] = include_bytes!("../static/favicon.svg");
+const FAVICON_ICO: &[u8] = include_bytes!("../static/favicon.ico");
+const APPLE_TOUCH_ICON: &[u8] = include_bytes!("../static/apple-touch-icon.png");
 
 pub fn app(state: Shared) -> Router {
     Router::new()
@@ -46,6 +49,9 @@ pub fn app(state: Shared) -> Router {
         .route("/a/{report}/{*rest}", get(asset))
         .route("/static/report.css", get(|| async { css(REPORT_CSS) }))
         .route("/static/share.css", get(|| async { css(SHARE_CSS) }))
+        .route("/favicon.svg", get(|| async { icon("image/svg+xml", FAVICON_SVG) }))
+        .route("/favicon.ico", get(|| async { icon("image/x-icon", FAVICON_ICO) }))
+        .route("/apple-touch-icon.png", get(|| async { icon("image/png", APPLE_TOUCH_ICON) }))
         .route("/", get(|| async { Redirect::temporary("/app") }))
         .route("/app", get(spa_index))
         .route("/app/", get(spa_index))
@@ -57,6 +63,11 @@ pub fn app(state: Shared) -> Router {
 fn css(body: &'static str) -> Response {
     ([(header::CONTENT_TYPE, "text/css; charset=utf-8"), (header::CACHE_CONTROL, "public, max-age=300")], body)
         .into_response()
+}
+
+/// Public on purpose: the share and status pages link these for readers who are not logged in.
+fn icon(mime: &'static str, body: &'static [u8]) -> Response {
+    ([(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "public, max-age=86400")], body).into_response()
 }
 
 /// Report assets for the workbench and agents. Share pages use `/s/<token>/a/...` instead.

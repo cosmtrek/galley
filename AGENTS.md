@@ -17,6 +17,7 @@ AI 报告的批注、修订、验证与发布工具。Rust 单文件服务（axu
 
 - 工作台在编译期嵌入二进制（`rust-embed` 读取 `web/dist`），改了 `web/` 必须先 `pnpm build` 再 `cargo build`，否则服务仍在提供旧页面。
 - `web/src/styles/report.css` 也被服务端 `include_str!` 进分享页，改它会同时影响工作台和分享页，改完要重新编译服务端。
+- 站点图标以 `server/static/favicon.svg` 为准，由服务端在 `/favicon.svg` 提供给工作台、分享页和状态页（无需登录）。`favicon.ico`（16/32/48）和 `apple-touch-icon.png`（180，白底）是从它导出的 PNG，改图形时要一起重新导出，并同步顶栏用的 `web/src/components/Logo.svelte`。
 - 改动后按范围跑：
 
 ```sh
