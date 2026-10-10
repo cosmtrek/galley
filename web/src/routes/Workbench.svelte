@@ -22,7 +22,7 @@
   type Group = { key: GroupKey; label: string; items: Comment[] };
   type Ref = { getBoundingClientRect(): DOMRect };
   type Popover =
-    | { kind: "compose"; anchor: Anchor; label: string | null; ref: Ref; range: Range | null }
+    | { kind: "compose"; anchor: Anchor; label: string | null; ref: Ref; range: Range | null; touch?: boolean }
     | { kind: "view"; commentId: string; ref: Ref };
 
   const MODE_KEY = "galley.mode";
@@ -261,6 +261,7 @@
   });
   onDestroy(() => {
     clearInterval(poll);
+    clearTimeout(selTimer);
     if ("highlights" in CSS) for (const h of HIGHLIGHTS) CSS.highlights.delete(h);
   });
 
@@ -318,16 +319,19 @@
     const el = popEl;
     if (!p || !el) return;
     el.style.visibility = "hidden";
+    const touch = p.kind === "compose" && !!p.touch;
     computePosition(p.ref, el, {
       placement: "bottom-start",
       strategy: "absolute",
-      middleware: [offset(8), flip({ padding: 8 }), shift({ padding: 8 })],
+      // Clear the selection handles that hang below the text on touch screens.
+      middleware: [offset(touch ? 32 : 8), flip({ padding: 8 }), shift({ padding: 8 })],
     }).then(({ x, y }) => {
       el.style.left = `${x}px`;
       el.style.top = `${y}px`;
       el.style.visibility = "visible";
       // A hidden element cannot take focus, so the composer's own autofocus is a no-op here.
-      if (p.kind === "compose") el.querySelector("textarea")?.focus({ preventScroll: true });
+      // On touch, focusing would pop up the keyboard and drop the selection while it is still being adjusted.
+      if (p.kind === "compose" && !touch) el.querySelector("textarea")?.focus({ preventScroll: true });
     });
   });
 
@@ -423,25 +427,39 @@
     };
   }
 
+  async function composeFromSelection(at: (range: Range) => [number, number], touch: boolean) {
+    if (!articleEl) return;
+    const sel = getSelection();
+    const a = selectionToAnchor(sel, articleEl);
+    if (!a || !sel) return;
+    if (pop?.kind === "compose" && JSON.stringify(pop.anchor) === JSON.stringify(a)) return;
+    const range = sel.getRangeAt(0).cloneRange();
+    const ok = await openPopover({ kind: "compose", anchor: a, label: null, ref: pointerRef(range, ...at(range)), range, touch });
+    if (ok) activeId = null;
+    else sel.removeAllRanges();
+  }
+
   function onArticleMouseUp(e: MouseEvent) {
     if (!commenting) return;
     const { clientX, clientY } = e;
-    setTimeout(async () => {
-      if (!articleEl) return;
-      const sel = getSelection();
-      const a = selectionToAnchor(sel, articleEl);
-      if (!a || !sel) return;
-      const range = sel.getRangeAt(0).cloneRange();
-      const ok = await openPopover({
-        kind: "compose",
-        anchor: a,
-        label: null,
-        ref: pointerRef(range, clientX, clientY),
-        range,
-      });
-      if (ok) activeId = null;
-      else sel.removeAllRanges();
-    }, 0);
+    setTimeout(() => composeFromSelection(() => [clientX, clientY], false), 0);
+  }
+
+  // Touch selection (long press, dragging the handles) fires no mouseup, so wait for it to settle.
+  let lastPointer = "mouse";
+  let selTimer: ReturnType<typeof setTimeout> | undefined;
+  function onSelectionChange() {
+    clearTimeout(selTimer);
+    if (!commenting || lastPointer === "mouse") return;
+    selTimer = setTimeout(
+      () =>
+        composeFromSelection((range) => {
+          const rects = Array.from(range.getClientRects()).filter((r) => r.width > 0);
+          const end = rects[rects.length - 1] ?? range.getBoundingClientRect();
+          return [end.right, end.top + end.height / 2];
+        }, true),
+      400,
+    );
   }
 
   async function startBlock(blockId: string, heading: boolean) {
@@ -588,7 +606,11 @@
 </script>
 
 <svelte:window onkeydown={onKeydown} />
-<svelte:document onmousedown={onDocMouseDown} />
+<svelte:document
+  onmousedown={onDocMouseDown}
+  onpointerdown={(e) => (lastPointer = e.pointerType)}
+  onselectionchange={onSelectionChange}
+/>
 
 <TopBar {report} active="workbench" />
 

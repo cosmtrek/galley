@@ -463,10 +463,18 @@ pre.cmd { background: var(--code-bg); padding: var(--sp-3); overflow-x: auto; fo
   .workbench { grid-template-columns: minmax(0, 1fr); }
   .outline { display: none; }
   .workbench.reading { grid-template-columns: minmax(0, 1fr); }
+  .paper, .workbench.reading .paper { padding: var(--sp-5) var(--sp-4) 120px; }
   .rail { position: sticky; bottom: 0; top: auto; height: auto; border-left: none; border-top: 1px solid var(--line); background: var(--bg); z-index: 10; }
   .rail-btn { flex-direction: row; height: auto; padding: var(--sp-3) var(--sp-4); }
   .rail-item { flex-direction: row; gap: 4px; align-items: baseline; }
   .sidebar { position: static; height: auto; border-left: none; border-top: 1px solid var(--line); }
   .history { grid-template-columns: 1fr; }
+}
+/* The gutter "+" needs a left margin of its own; narrow pointer windows keep it, touch screens drop it. */
+@media (max-width: 860px) and (hover: hover) {
+  .paper { padding-left: 40px; }
+}
+@media (max-width: 860px) and (hover: none) {
+  .gutter-add { display: none; }
 }
 .paper .report [data-block] { scroll-margin-top: calc(var(--topbar-h) + 48px); }
