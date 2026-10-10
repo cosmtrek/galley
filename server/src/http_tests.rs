@@ -306,6 +306,47 @@ async fn mcp_tools() {
     assert_eq!(st, StatusCode::FORBIDDEN);
 }
 
+#[tokio::test]
+async fn mcp_does_not_offer_archived_rounds() {
+    let t = T::new().await;
+    let tool = |name: &str, args: Value| {
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": name, "arguments": args } })
+    };
+    let text = |v: &Value| v["result"]["content"][0]["text"].as_str().unwrap().to_string();
+    let (_, r, _) = t.req("POST", "/api/reports", Who::Agent, Some(json!({ "markdown": V1 }))).await;
+    let rid = r["id"].as_str().unwrap().to_string();
+    let (_, report, _) = t.req("GET", &format!("/api/reports/{rid}"), Who::Owner, None).await;
+    let comment = json!({ "body": "核实", "anchor": { "type": "block", "block_id": block_id(&report, "同比增长") } });
+    t.req("POST", &format!("/api/reports/{rid}/comments"), Who::Owner, Some(comment)).await;
+    let (_, round, _) = t.req("POST", &format!("/api/reports/{rid}/rounds"), Who::Owner, None).await;
+    let round_id = round["id"].as_str().unwrap().to_string();
+
+    let (_, list, _) = t.req("POST", "/mcp", Who::Agent, Some(tool("galley_list_reports", json!({})))).await;
+    assert!(text(&list).contains("等 AI 处理") && text(&list).contains(&round_id), "{list}");
+
+    // Archived while still submitted: listed as archived, not offered, and nothing is claimed.
+    t.req("POST", &format!("/api/reports/{rid}/archive"), Who::Owner, None).await;
+    let (_, list, _) = t.req("POST", "/mcp", Who::Agent, Some(tool("galley_list_reports", json!({})))).await;
+    let list = text(&list);
+    assert!(list.contains("已归档") && !list.contains(&round_id) && !list.contains("submitted"), "{list}");
+    let (_, got, _) = t.req("POST", "/mcp", Who::Agent, Some(tool("galley_get_round", json!({ "report_id": rid })))).await;
+    assert_eq!(text(&got), "报告已归档，没有待处理的轮次。", "{got}");
+    let (_, got, _) = t.req("POST", "/mcp", Who::Agent, Some(tool("galley_get_round", json!({})))).await;
+    assert!(text(&got).contains("没有待处理"), "{got}");
+    let (_, rd, _) = t.req("GET", &format!("/api/rounds/{round_id}"), Who::Owner, None).await;
+    assert_eq!(rd["status"], "submitted", "{rd}");
+
+    // Archived mid-processing: the packet is not handed out again either.
+    t.req("POST", &format!("/api/reports/{rid}/unarchive"), Who::Owner, None).await;
+    let (_, got, _) = t.req("POST", "/mcp", Who::Agent, Some(tool("galley_get_round", json!({ "report_id": rid })))).await;
+    assert!(text(&got).contains(&round_id), "{got}");
+    t.req("POST", &format!("/api/reports/{rid}/archive"), Who::Owner, None).await;
+    let (_, got, _) = t.req("POST", "/mcp", Who::Agent, Some(tool("galley_get_round", json!({ "report_id": rid })))).await;
+    assert_eq!(text(&got), "报告已归档，没有待处理的轮次。", "{got}");
+    let (_, rd, _) = t.req("GET", &format!("/api/rounds/{round_id}"), Who::Owner, None).await;
+    assert_eq!(rd["status"], "processing", "{rd}");
+}
+
 fn first_img_src(html: &str) -> String {
     html.split("<img src=\"").nth(1).unwrap().split('"').next().unwrap().to_string()
 }

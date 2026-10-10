@@ -20,7 +20,7 @@ fn tools() -> Value {
     json!([
         {
             "name": "galley_list_reports",
-            "description": "List Galley reports with their current version and any round waiting for the agent.",
+            "description": "List Galley reports with their current version and any round waiting for the agent. Archived reports are read-only; their rounds are frozen and need no action.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -104,7 +104,9 @@ fn call_tool(s: &Shared, role: Role, name: &str, args: &Value) -> Result<String,
             let mut out = String::new();
             for r in reports {
                 let round = match &r.active_round {
-                    Some(rd) => format!("第 {} 轮 {}（round_id {}）", rd.seq, rd.status.as_str(), rd.id),
+                    _ if r.archived_at.is_some() => "已归档（只读，无需处理）".into(),
+                    Some(rd) if rd.status == RoundStatus::Verifying => format!("第 {} 轮等 owner 验证，无需处理", rd.seq),
+                    Some(rd) => format!("第 {} 轮等 AI 处理（{}，round_id {}）", rd.seq, rd.status.as_str(), rd.id),
                     None => "无进行中的轮次".into(),
                 };
                 out.push_str(&format!("- {} `{}` v{} · {}\n", r.title, r.id, r.current_seq, round));
@@ -123,7 +125,15 @@ fn call_tool(s: &Shared, role: Role, name: &str, args: &Value) -> Result<String,
             let round = {
                 let store = s.store();
                 match args.get("report_id").and_then(Value::as_str) {
-                    Some(id) => store.active_round(id)?,
+                    Some(id) => {
+                        let info = store.report_info(id)?;
+                        // Checked before the status branch: a round archived mid-processing would otherwise
+                        // hand out its packet without a claim, and the agent's work would be refused later.
+                        if info.archived_at.is_some() {
+                            return Ok("报告已归档，没有待处理的轮次。".into());
+                        }
+                        info.active_round
+                    }
                     None => store.pending_rounds()?.into_iter().map(|(_, r)| r).next(),
                 }
             };
