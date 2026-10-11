@@ -257,7 +257,7 @@ async fn full_round_and_privacy() {
     }
     assert!(headers.contains("noindex"));
     assert!(headers.contains("script-src 'none'"));
-    assert!(headers.contains("img-src 'self' data:"));
+    assert!(headers.contains("img-src 'self' data: http: https:;"));
     assert!(headers.contains("no-referrer"));
     assert!(html.contains(r#"<link rel="icon" href="/favicon.svg""#), "share page has no favicon");
 
@@ -271,6 +271,21 @@ async fn full_round_and_privacy() {
     assert!(gone.as_str().unwrap().contains(r#"<link rel="icon" href="/favicon.svg""#), "status page has no favicon");
     let (st, _, _) = t.req("GET", "/s/doesnotexist", Who::Anon, None).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn external_images_show_on_the_share_page() {
+    let t = T::new().await;
+    let md = "---\ntitle: 外链\n---\n\n![图](https://img.example.com/a.png)\n";
+    let (_, r, _) = t.req("POST", "/api/reports", Who::Agent, Some(json!({ "markdown": md }))).await;
+    let rid = r["id"].as_str().unwrap().to_string();
+    let (_, p, _) = t.req("POST", &format!("/api/reports/{rid}/publications"), Who::Owner, None).await;
+    let path = p["publication"]["path"].as_str().unwrap().to_string();
+    let (st, html, headers) = t.req("GET", &path, Who::Anon, None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(html.as_str().unwrap().contains(r#"<img src="https://img.example.com/a.png" alt="图">"#), "{html}");
+    assert!(headers.contains("https:"), "{headers}");
+    assert!(headers.contains("no-referrer"), "{headers}");
 }
 
 #[tokio::test]

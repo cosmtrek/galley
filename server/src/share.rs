@@ -30,9 +30,13 @@ fn with_headers(status: StatusCode, body: String) -> Response {
     let mut resp = (status, Html(body)).into_response();
     let h = resp.headers_mut();
     h.insert("x-robots-tag", HeaderValue::from_static("noindex, nofollow"));
+    // External images are allowed so the page shows what the owner verified in the workbench;
+    // `no-referrer` keeps the share URL from reaching the image hosts.
     h.insert(
         header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static("default-src 'self'; img-src 'self' data:; script-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"),
+        HeaderValue::from_static(
+            "default-src 'self'; img-src 'self' data: http: https:; script-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+        ),
     );
     h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
