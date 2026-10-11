@@ -75,7 +75,7 @@ pub fn parse(markdown: &str, asset_url: AssetUrl) -> Doc {
                     src_lines: lines.span(range.start + body_start, range.end + body_start),
                     list: None,
                     html: "<hr>".into(),
-                    sig: format!("hr{i}"),
+                    sig: String::new(),
                 });
                 i += 1;
             }

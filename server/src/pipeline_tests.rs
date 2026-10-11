@@ -351,6 +351,18 @@ fn cross_block_anchor() {
 }
 
 #[test]
+fn rules_keep_their_ids_when_markup_above_changes() {
+    let mut old = parse("## A\n\n这是一段比较长的文字内容。\n\n---\n\n## B\n\n二段。\n\n---\n\n结尾。\n", &prefix("/a/"));
+    assign_fresh(&mut old);
+    // Same visible text, but the emphasis changes the parser's event count before both rules.
+    let mut new = parse("## A\n\n这是一段比较长的**文字**内容。\n\n---\n\n## B\n\n二段。\n\n---\n\n结尾。\n", &prefix("/a/"));
+    align(&old, &mut new);
+    assert!(compare(&old, &new).changes.is_empty(), "{:?}", compare(&old, &new).changes);
+    let ids = |d: &Doc| d.blocks.iter().map(|b| b.id.clone()).collect::<Vec<_>>();
+    assert_eq!(ids(&old), ids(&new));
+}
+
+#[test]
 fn diagrams_render_as_images() {
     use base64::Engine;
     let md = "```mermaid\nflowchart LR\n  A[开始] --> B{判断}\n  B -->|是| C[结束]\n```\n\n```svg\n<svg viewBox=\"0 0 10 10\"><script>alert(1)</script><circle r=\"4\"/></svg>\n```\n\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\"><rect width=\"20\" height=\"20\"/></svg>\n\n```mermaid\nnot a diagram ][\n```\n\n<div onclick=\"x\">raw</div>\n";

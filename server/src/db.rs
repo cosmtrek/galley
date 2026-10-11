@@ -10,6 +10,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0005_round_completed_at.sql"),
     include_str!("../migrations/0006_kv.sql"),
     include_str!("../migrations/0007_report_archive.sql"),
+    include_str!("../migrations/0008_rule_sig.sql"),
 ];
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
@@ -64,6 +65,32 @@ mod tests {
         assert_eq!(completed, None);
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
         assert_eq!(version, MIGRATIONS.len() as i64);
+    }
+
+    #[test]
+    fn drops_index_signatures_from_stored_rules() {
+        let conn = Connection::open_in_memory().unwrap();
+        for sql in &MIGRATIONS[..7] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 7).unwrap();
+        let blocks = r#"{"title":"t","summary":"","blocks":[{"id":"b_1","kind":"image","sig":"assets/a.png"},{"id":"b_2","kind":"rule","sig":"hr7"},{"id":"b_3","kind":"paragraph"}]}"#;
+        conn.execute(
+            "INSERT INTO reports (id, title, created_at, updated_at) VALUES ('r', 't', 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO versions (id, report_id, seq, markdown, html, blocks, created_at) VALUES ('v', 'r', 1, '', '', ?1, 0)",
+            [blocks],
+        )
+        .unwrap();
+        let conn = init(conn).unwrap();
+        let stored: String = conn.query_row("SELECT blocks FROM versions WHERE id = 'v'", [], |r| r.get(0)).unwrap();
+        assert_eq!(
+            stored,
+            r#"{"title":"t","summary":"","blocks":[{"id":"b_1","kind":"image","sig":"assets/a.png"},{"id":"b_2","kind":"rule"},{"id":"b_3","kind":"paragraph"}]}"#
+        );
     }
 }
 
