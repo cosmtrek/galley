@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use crate::align::{align, assign_fresh};
 use crate::anchor::{Anchor, AnchorState, relocate};
 use crate::db::{now_ms, random_token, short_id};
-use crate::diff::{BlockChange, BlockDiff, ChangeOp, compare};
+use crate::diff::{BlockChange, BlockDiff, ChangeOp, compare, replacements};
 use crate::doc::{BlockKind, Doc, parse};
 use crate::domain::{
     CommentAction, CommentStatus, Role, RoundAction, RoundStatus, comment_transition, round_transition,
@@ -982,6 +982,16 @@ impl Store {
         titles.extend(section_titles(&target.doc));
         let diff = result.as_ref().and_then(|r| r.diff.clone()).unwrap_or_default();
         let comments = self.comments(&round.report_id, Some(&target.id))?;
+        // Replacement runs whose added blocks weren't flagged as extra belong to the comments on what they
+        // replaced; list them there, or the new text would show up nowhere on the verify page.
+        let extra_ids: HashSet<&str> = round.extra_changes.iter().map(|e| e.change.block_id.as_str()).collect();
+        let replaced: Vec<(Vec<String>, Vec<String>)> = result
+            .as_ref()
+            .map(|r| replacements(&base.doc, &r.doc))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, adds)| adds.iter().all(|a| !extra_ids.contains(a.as_str())))
+            .collect();
         let mut items = Vec::new();
         for mut c in comments.into_iter().filter(|c| c.round_id.as_deref() == Some(round_id)) {
             let base_anchor = anchor_at(&self.conn, &c.id, &base.id)?;
@@ -1001,17 +1011,25 @@ impl Store {
             if let Some(h) = heading {
                 let span: HashSet<String> = base.doc.section_span(h).into_iter().chain(target.doc.section_span(h)).collect();
                 section_changes = diff.changes.iter().filter(|ch| span.contains(&ch.block_id)).cloned().collect();
-            } else if spans(&c.anchor) || base_anchor.as_ref().is_some_and(spans) {
+            } else {
                 let mut ids: HashSet<String> = c.anchor.block_ids(&target.doc).into_iter().collect();
                 if let Some(a) = &base_anchor {
                     ids.extend(a.block_ids(&base.doc));
                 }
-                section_changes = diff.changes.iter().filter(|ch| ids.contains(&ch.block_id)).cloned().collect();
-            } else {
-                for id in [base_anchor.as_ref().and_then(|a| a.block_id()), c.anchor.block_id()].into_iter().flatten() {
-                    if let Some(ch) = diff.get(id) {
-                        change = Some(ch.clone());
-                        break;
+                let runs: Vec<&String> = replaced
+                    .iter()
+                    .filter(|(dels, _)| dels.iter().any(|d| ids.contains(d)))
+                    .flat_map(|(dels, adds)| dels.iter().chain(adds))
+                    .collect();
+                if spans(&c.anchor) || base_anchor.as_ref().is_some_and(spans) || !runs.is_empty() {
+                    ids.extend(runs.into_iter().cloned());
+                    section_changes = diff.changes.iter().filter(|ch| ids.contains(&ch.block_id)).cloned().collect();
+                } else {
+                    for id in [base_anchor.as_ref().and_then(|a| a.block_id()), c.anchor.block_id()].into_iter().flatten() {
+                        if let Some(ch) = diff.get(id) {
+                            change = Some(ch.clone());
+                            break;
+                        }
                     }
                 }
             }
@@ -1680,6 +1698,9 @@ fn packet_comment(c: &Comment, doc: &Doc) -> PacketComment {
 
 /// Changed blocks that no comment of this round covers. A section comment, or any comment anchored on a
 /// heading, covers the whole section in both versions so the agent's rewrite of it isn't flagged as extra.
+/// A rewrite too different to keep its block id comes out as "deleted + added"; the added blocks are covered
+/// only when every block deleted in that run was commented on, so new material next to a commented
+/// paragraph (e.g. a "remove this" comment beside a freshly written section) is still flagged.
 fn extra_changes(tx: &Transaction, round_id: &str, base: &Doc, result: &Doc, diff: &BlockDiff) -> AppResult<Vec<ExtraChange>> {
     let ids: Vec<String> = tx
         .prepare("SELECT id FROM comments WHERE round_id = ?1")?
@@ -1698,6 +1719,11 @@ fn extra_changes(tx: &Transaction, round_id: &str, base: &Doc, result: &Doc, dif
                 covered.extend(result.section_span(h));
             }
             covered.extend(anchor.block_ids(base));
+        }
+    }
+    for (dels, adds) in replacements(base, result) {
+        if dels.iter().all(|d| covered.contains(d)) {
+            covered.extend(adds);
         }
     }
     Ok(diff

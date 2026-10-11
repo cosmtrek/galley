@@ -149,6 +149,35 @@ pub fn compare(old: &Doc, new: &Doc) -> BlockDiff {
     BlockDiff { changes }
 }
 
+/// Deleted and added blocks that sit between the same two unchanged neighbours, i.e. what replaced what.
+/// A rewrite too different to pair as "modified" shows up here as one run. Runs missing either side are dropped.
+pub fn replacements(old: &Doc, new: &Doc) -> Vec<(Vec<BlockId>, Vec<BlockId>)> {
+    let old_ids: Vec<&str> = old.blocks.iter().map(|b| b.id.as_str()).collect();
+    let new_ids: Vec<&str> = new.blocks.iter().map(|b| b.id.as_str()).collect();
+    let in_old: HashSet<&str> = old_ids.iter().copied().collect();
+    let in_new: HashSet<&str> = new_ids.iter().copied().collect();
+    let mut out = Vec::new();
+    let (mut dels, mut adds) = (Vec::new(), Vec::new());
+    let flush = |dels: &mut Vec<BlockId>, adds: &mut Vec<BlockId>, out: &mut Vec<(Vec<BlockId>, Vec<BlockId>)>| {
+        if !dels.is_empty() && !adds.is_empty() {
+            out.push((std::mem::take(dels), std::mem::take(adds)));
+        }
+        dels.clear();
+        adds.clear();
+    };
+    for op in capture_diff_slices(Algorithm::Myers, &old_ids, &new_ids) {
+        if let DiffOp::Equal { .. } = op {
+            flush(&mut dels, &mut adds, &mut out);
+            continue;
+        }
+        let (_, or, nr) = op.as_tag_tuple();
+        dels.extend(old_ids[or].iter().filter(|id| !in_new.contains(*id)).map(|id| id.to_string()));
+        adds.extend(new_ids[nr].iter().filter(|id| !in_old.contains(*id)).map(|id| id.to_string()));
+    }
+    flush(&mut dels, &mut adds, &mut out);
+    out
+}
+
 fn table_cells(old: &Block, new: &Block) -> Option<Vec<CellChange>> {
     let (oc, nc) = (old.cells.as_ref()?, new.cells.as_ref()?);
     let rows = oc.len().max(nc.len());

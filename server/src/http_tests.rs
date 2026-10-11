@@ -533,6 +533,72 @@ async fn a_comment_on_a_heading_covers_the_whole_nested_section() {
     assert!(section_changes.iter().all(|ch| ch["new_text"] != "场景段落改了。"), "{item}");
 }
 
+/// Comments `commented` paragraphs of `before` (one block comment each), submits `after`, and returns the
+/// texts of the extra changes plus the review.
+async fn rewrite_round(before: &str, commented: &[&str], after: &str) -> (Vec<String>, Value) {
+    let t = T::new().await;
+    let (_, r, _) = t.req("POST", "/api/reports", Who::Agent, Some(json!({ "markdown": before }))).await;
+    let rid = r["id"].as_str().unwrap().to_string();
+    let (_, report, _) = t.req("GET", &format!("/api/reports/{rid}"), Who::Owner, None).await;
+    let mut replies = Vec::new();
+    for text in commented {
+        let anchor = json!({ "type": "block", "block_id": block_id(&report, text) });
+        let (st, c, _) = t.req("POST", &format!("/api/reports/{rid}/comments"), Who::Owner, Some(json!({ "body": "改", "anchor": anchor }))).await;
+        assert_eq!(st, StatusCode::OK, "{c}");
+        replies.push(json!({ "comment_id": c["id"], "action": "changed", "body": "已改" }));
+    }
+    let (_, round, _) = t.req("POST", &format!("/api/reports/{rid}/rounds"), Who::Owner, None).await;
+    let round_id = round["id"].as_str().unwrap().to_string();
+    let (st, res, _) = t
+        .req("POST", &format!("/api/rounds/{round_id}/result"), Who::Agent, Some(json!({ "markdown": after, "summary": "x", "replies": replies })))
+        .await;
+    assert_eq!(st, StatusCode::OK, "{res}");
+    let extra = res["extra_changes"].as_array().unwrap();
+    let texts = extra.iter().map(|e| e["new_text"].as_str().or(e["old_text"].as_str()).unwrap().to_string()).collect();
+    let (_, review, _) = t.req("GET", &format!("/api/rounds/{round_id}/review"), Who::Owner, None).await;
+    (texts, review)
+}
+
+const REWRITE_V1: &str = "---\ntitle: 介绍\n---\n\n## 一、简介\n\nGalley 是一个自托管的审阅工作台，在报告上写评论再交给 AI 修改。\n\n它的出发点是替代另一个产品里写报告的流程。\n\n## 二、安装\n\n用 Docker 启动。\n";
+
+#[tokio::test]
+async fn rewriting_commented_paragraphs_beyond_recognition_is_not_extra() {
+    // Both paragraphs are rewritten too much to keep their block ids, so the diff sees "2 deleted + 2 added".
+    let after = REWRITE_V1
+        .replace("Galley 是一个自托管的审阅工作台，在报告上写评论再交给 AI 修改。", "像批改文稿一样审阅 AI 写的报告，核对无误后再发布。")
+        .replace("它的出发点是替代另一个产品里写报告的流程。", "很难看出每一版到底改了哪里，也不知道有没有顺手动了别处。");
+    let (extra, review) = rewrite_round(REWRITE_V1, &["自托管", "出发点"], &after).await;
+    assert!(extra.is_empty(), "{extra:?}");
+
+    // The new text is listed under the comments, since it is no longer listed as extra.
+    let item = &review["items"][0];
+    let shown: Vec<&str> = item["section_changes"].as_array().unwrap().iter().filter_map(|c| c["new_text"].as_str()).collect();
+    assert!(shown.iter().any(|t| t.starts_with("像批改文稿")), "{item}");
+}
+
+#[tokio::test]
+async fn splitting_a_commented_paragraph_into_several_is_not_extra() {
+    let after = REWRITE_V1.replace(
+        "它的出发点是替代另一个产品里写报告的流程。",
+        "每次改完很难核对。\n\n- 不知道改了哪里；\n- 不知道有没有动别处。",
+    );
+    let (extra, _) = rewrite_round(REWRITE_V1, &["出发点"], &after).await;
+    assert!(extra.is_empty(), "{extra:?}");
+}
+
+#[tokio::test]
+async fn new_text_beside_a_commented_paragraph_is_still_extra() {
+    // "Remove this" on the first paragraph; the agent also drops the uncommented second one and writes
+    // something new in their place. The new paragraph replaces more than what was commented on.
+    let after = REWRITE_V1.replace(
+        "Galley 是一个自托管的审阅工作台，在报告上写评论再交给 AI 修改。\n\n它的出发点是替代另一个产品里写报告的流程。",
+        "全新的一段，没有人要求写它。",
+    );
+    let (extra, _) = rewrite_round(REWRITE_V1, &["自托管"], &after).await;
+    assert!(extra.iter().any(|t| t == "全新的一段，没有人要求写它。"), "{extra:?}");
+    assert!(extra.iter().any(|t| t.starts_with("它的出发点")), "{extra:?}");
+}
+
 #[tokio::test]
 async fn reverting_an_extra_change_drafts_a_comment() {
     let t = T::new().await;
