@@ -663,11 +663,11 @@
       </article>
       {#if commenting && gutter && !touch.current}
         <button
-          class="gutter-add sm icon"
+          class="gutter-add ghost sm icon"
           style="top: {gutter.top + 1}px"
           title={gutter.heading ? "评论整章" : "评论整段"}
           aria-label={gutter.heading ? "评论整章" : "评论整段"}
-          onclick={() => gutter && startBlock(gutter.blockId, gutter.heading)}><Icon name="plus" /></button>
+          onclick={() => gutter && startBlock(gutter.blockId, gutter.heading)}><Icon name="message" /></button>
       {/if}
       {#if pop}
         <div class="pop" bind:this={popEl} role="dialog" aria-label={pop.kind === "compose" ? "写评论" : "评论"}>
@@ -803,7 +803,7 @@
               {#if touch.current}
                 长按选中正文文字即可评论。
               {:else}
-                选中正文文字即可评论；鼠标移到段落左侧点「＋」评论整段，移到标题左侧点「＋」评论整章。
+                选中正文文字即可评论；鼠标移到段落或标题左侧，点评论图标可评论整段或整章。
               {/if}
             </div>
           {/each}

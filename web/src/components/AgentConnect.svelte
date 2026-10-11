@@ -36,25 +36,26 @@
   const current = $derived(clients.find((c) => c.key === client) ?? clients[0]);
 </script>
 
-<p class="small lead">
-  在终端运行一次下面的命令，把 Galley 接到你的 AI 工具。之后每次在 Galley 提交一轮评论，到 AI 工具里说「处理 Galley 评论」即可；Galley 不会主动调用 AI。
-</p>
+<p class="muted">在终端运行一次，把 Galley 接到你的 AI 工具。</p>
 <div class="utabs">
   {#each clients as c (c.key)}
     <button class:on={client === c.key} onclick={() => (client = c.key)}>{c.name}</button>
   {/each}
 </div>
 <pre class="cmd">{current.cmd(showToken ? token : masked)}</pre>
-<div class="actions small">
-  <span class="spacer">
-    <button class="link" onclick={() => (showToken = !showToken)}>{showToken ? "隐藏 token" : "显示 token"}</button>
-    {#if failed}<span class="muted"> · 无法自动复制，请显示 token 后手动复制。</span>{:else if current.note}<span class="muted"> · {current.note}</span>{/if}
-  </span>
-  <CopyButton text={current.cmd(token)} label="复制命令" disabled={!token} bind:failed />
+{#if current.note}<p class="note">{current.note}</p>{/if}
+<div class="cmd-bar">
+  <p class="note spacer">
+    {#if failed}无法自动复制，请显示 token 后手动复制。{:else}命令包含真实 token，不要贴到公开的地方。{/if}
+  </p>
+  <div class="cmd-btns">
+    <button class="ghost sm" onclick={() => (showToken = !showToken)}>{showToken ? "隐藏 token" : "显示 token"}</button>
+    <CopyButton text={current.cmd(token)} label="复制命令" small disabled={!token} bind:failed />
+  </div>
 </div>
-<p class="muted small">复制的命令包含真实 token，不要贴到公开的地方。token 也在服务端 <code>data/secrets.json</code> 或环境变量 <code>GALLEY_AGENT_TOKEN</code> 中。</p>
 <details class="small">
-  <summary class="muted">不用 MCP？直接调 HTTP API</summary>
+  <summary>不用 MCP？直接调 HTTP API</summary>
   <pre class="cmd">curl -H "Authorization: Bearer $GALLEY_AGENT_TOKEN" {publicUrl}/api/pending
 curl -H "Authorization: Bearer $GALLEY_AGENT_TOKEN" "{publicUrl}/api/reports/&lt;id&gt;/rounds/current?format=md"</pre>
+  <p class="muted">token 在服务端 <code>data/secrets.json</code> 或环境变量 <code>GALLEY_AGENT_TOKEN</code> 中。</p>
 </details>

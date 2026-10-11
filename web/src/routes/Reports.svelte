@@ -167,19 +167,16 @@
   onMount(load);
 </script>
 
-{#snippet promptRow()}
+{#snippet sendPrompt()}
   <div class="prompt-row">
     <span class="prompt">{PROMPT}</span>
     <CopyButton text={PROMPT} />
   </div>
-{/snippet}
-
-{#snippet receivedArea()}
   {#if received.length === 0}
-    <p class="muted small"><span class="dot warn"></span> 等待 AI 发来报告…</p>
+    <p class="note"><span class="dot warn"></span>等待 AI 发来报告…</p>
   {:else}
     {#each received as r (r.id)}
-      <p class="small received"><span class="dot ok"></span> 已收到「{r.title}」 <a href="/app/r/{r.id}">打开 →</a></p>
+      <p class="note"><span class="dot ok"></span>已收到「{r.title}」<a href="/app/r/{r.id}">打开 →</a></p>
     {/each}
   {/if}
 {/snippet}
@@ -195,47 +192,44 @@
   {/if}
 {/snippet}
 
-{#snippet aiFlow(inline: boolean)}
+{#snippet aiFlow()}
   {#if lastSeen === null}
-    <div class="steps">
-      <div class="step-block">
-        <p class="small step">
-          <b>① 接入 AI</b>
-          <span class="muted"><span class="dot warn"></span> 等待连接…</span>
-        </p>
-        <div><AgentConnect {publicUrl} {token} /></div>
-      </div>
-      <div class="step-block">
-        <p class="small step"><b>② 让 AI 把报告发过来</b></p>
-        <div class="sec">
-          <p class="small">在 AI 工具里说：</p>
-          {@render promptRow()}
-          {@render receivedArea()}
-        </div>
-      </div>
-    </div>
+    <section class="step-sec">
+      <h3 class="step-title">
+        <span class="step-num">1</span>接入 AI
+        <span class="step-status"><span class="dot warn"></span>等待连接…</span>
+      </h3>
+      <AgentConnect {publicUrl} {token} />
+    </section>
+    <section class="step-sec">
+      <h3 class="step-title"><span class="step-num">2</span>在 AI 工具里说</h3>
+      {@render sendPrompt()}
+    </section>
   {:else}
-    <div class="sec">
-      {#if inline}<p class="muted small"><span class="dot ok"></span> 最近连接 {fmtAgo(lastSeen)}</p>{/if}
-      <p class="small">在 AI 工具里说：</p>
-      {@render promptRow()}
-      {@render receivedArea()}
-    </div>
+    <section class="step-sec">
+      <h3 class="step-title">
+        在 AI 工具里说
+        <span class="step-status"><span class="dot ok"></span>AI 最近连接 {fmtAgo(lastSeen)}</span>
+      </h3>
+      {@render sendPrompt()}
+    </section>
   {/if}
 {/snippet}
 
 {#snippet importForm()}
-  <div class="sec">
-    <div class="row">
-      <button onclick={() => fileInput?.click()}>选择 .md 文件</button>
-      <button class="ghost" onclick={() => { markdown = example; fileName = "示例报告"; }}>填入示例报告</button>
+  <section class="step-sec">
+    <div class="import-bar">
+      <span class="muted">
+        {#if fileName}已读入「{fileName}」，确认无误后创建。{:else}粘贴 Markdown，或把 .md 文件拖到这里。{/if}
+      </span>
+      <span class="spacer"></span>
+      <button class="ghost sm" onclick={() => { markdown = example; fileName = "示例报告"; }}>填入示例</button>
+      <button class="sm" onclick={() => fileInput?.click()}>选择文件</button>
     </div>
-    <p class="muted small">
-      {#if fileName}已读入「{fileName}」，确认无误后创建。{:else}把 .md 文件拖到这里、选择文件，或直接粘贴 Markdown，创建后作为 v1。{/if}
-    </p>
-  </div>
-  <textarea rows="12" bind:value={markdown} placeholder={"---\ntitle: 报告标题\nsummary: 一句话摘要\n---\n\n## 一、第一章\n\n正文……"}></textarea>
+    <textarea rows="14" bind:value={markdown} placeholder={"---\ntitle: 报告标题\nsummary: 一句话摘要\n---\n\n## 一、第一章\n\n正文……"}></textarea>
+  </section>
   <div class="actions">
+    <span class="note spacer">创建后作为 v1。</span>
     <button class="ghost" onclick={() => dlg?.close()}>取消</button>
     <button class="primary" disabled={!markdown.trim()} onclick={create}>创建</button>
   </div>
@@ -273,21 +267,16 @@
   {:else if reports.length === 0}
     <div class="panel empty-start">
       <h1>还没有报告</h1>
-      {@render aiFlow(true)}
-      <p class="muted small alt-line">
+      {@render aiFlow()}
+      <p class="muted alt-line">
         或者 <button class="link" onclick={() => openDialog("manual")}>手动导入</button> ·
         <button class="link" onclick={startExample}>用示例报告试试</button>
       </p>
     </div>
   {:else}
     <PageHeader title="报告">
-      {#snippet description()}
-        <span class="dot" class:ok={lastSeen !== null}></span>
-        {#if lastSeen === null}AI 从未连接{:else}AI 最近连接 {fmtAgo(lastSeen)}{/if} ·
-        <button class="link" onclick={() => openDialog("ai", true)}>接入方法</button>
-      {/snippet}
       {#snippet actions()}
-        <button class="primary" onclick={() => openDialog("ai")}><Icon name="plus" />添加报告</button>
+        <button class="ghost" onclick={() => openDialog("ai")}><Icon name="plus" />添加报告</button>
       {/snippet}
     </PageHeader>
     {#if archived.length > 0}
@@ -366,15 +355,12 @@
   {#if error && addOpen}<p class="error small">{error}</p>{/if}
   <div class="dlg-body">
     {#if addTab === "ai"}
-      {@render aiFlow(false)}
+      {@render aiFlow()}
       {#if lastSeen !== null}
-        <div class="dlg-foot">
-          <p class="muted small"><span class="dot ok"></span> 最近连接 {fmtAgo(lastSeen)}</p>
-          <details class="small" bind:open={setupOpen}>
-            <summary>接入方法 / 换个客户端</summary>
-            <AgentConnect {publicUrl} {token} />
-          </details>
-        </div>
+        <details class="dlg-foot" bind:open={setupOpen}>
+          <summary>接入方法 / 换个客户端</summary>
+          <div class="step-sec"><AgentConnect {publicUrl} {token} /></div>
+        </details>
       {/if}
     {:else}
       {@render importForm()}
