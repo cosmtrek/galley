@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from "svelte";
-  import { SvelteSet } from "svelte/reactivity";
+  import { MediaQuery, SvelteSet } from "svelte/reactivity";
   import { computePosition, flip, offset, shift } from "@floating-ui/dom";
   import { api, get, post } from "../lib/api";
   import { ask, confirmState } from "../lib/confirm.svelte";
@@ -42,6 +42,10 @@
   let submitting = $state(false);
   let batchBusy = $state(false);
   const picked = new SvelteSet<string>();
+  // Below this width the sidebar becomes a sheet opened from the bottom bar; keep in sync with app.css.
+  const narrow = new MediaQuery("max-width: 860px");
+  const touch = new MediaQuery("hover: none");
+  let sheetOpen = $state(false);
 
   let articleEl = $state<HTMLElement | null>(null);
   let paperEl = $state<HTMLElement | null>(null);
@@ -134,6 +138,23 @@
   const extraPending = $derived(withoutPartners(ctx, extraAll).filter((e) => !e.confirmed));
   const sectionTitle = (sid: string) => review?.section_titles[sid] ?? titles.get(sid) ?? "开头";
 
+  // The bottom bar on narrow screens: one line of where things stand, red when it is the owner's turn.
+  const mineCount = $derived(comments.filter((c) => groupOf(c) === "mine").length);
+  const barUrgent = $derived(mineCount > 0 || extraPending.length > 0 || (!round && submittable > 0));
+  const barText = $derived(
+    round?.status === "verifying"
+      ? `第 ${round.seq} 轮 · ${verifyCount ? `${verifyCount} 条待验证` : extraPending.length ? `${extraPending.length} 处改动待确认` : "处理完毕"}`
+      : round
+        ? `第 ${round.seq} 轮 · ${round.status === "submitted" ? "等待 AI" : "AI 处理中"}`
+        : mineCount
+          ? `${mineCount} 条需要我处理`
+          : submittable
+            ? `${submittable} 条评论待提交`
+            : comments.length
+              ? `${comments.length} 条评论`
+              : "选中文字即可评论",
+  );
+
   // A replacement is displayed as one item, so acting on it covers both halves.
   function pairIds(ch: ExtraChange) {
     const p = partner(ctx, ch);
@@ -173,6 +194,7 @@
     runExtra((rid) => post(`/api/rounds/${rid}/extra/revert`, { block_ids: pairIds(ch), body: revertBody(ch) }));
 
   function focusExtra(ch: ExtraChange) {
+    sheetOpen = false;
     const target = ch.op === "deleted" ? (partner(ctx, ch)?.block_id ?? ch.after) : ch.block_id;
     if (target) articleEl?.querySelector(`[data-block="${target}"]`)?.scrollIntoView({ block: "center" });
   }
@@ -275,6 +297,7 @@
     if (!(await closePopover())) return;
     mode = m;
     localStorage.setItem(MODE_KEY, m);
+    sheetOpen = false;
     gutter = null;
     activeId = null;
   }
@@ -293,6 +316,9 @@
     } else if (e.key === "Escape" && pop) {
       e.preventDefault();
       closePopover();
+    } else if (e.key === "Escape" && sheetOpen) {
+      e.preventDefault();
+      sheetOpen = false;
     }
   }
 
@@ -482,6 +508,7 @@
 
   async function startDocument() {
     if (!titleEl) return;
+    sheetOpen = false;
     titleEl.scrollIntoView({ block: "center" });
     if (await openPopover({ kind: "compose", anchor: { type: "document" }, label: "整篇评论", ref: titleEl, range: null }))
       activeId = null;
@@ -495,8 +522,18 @@
     getSelection()?.removeAllRanges();
     await load();
     activeId = c.id;
+    await revealCard(c.id);
+  }
+
+  /**
+   * Scrolls the sidebar to a card, but never the page: on narrow screens the sidebar sits below the
+   * report and does not scroll on its own, so scrolling the card into view would leave the text.
+   */
+  async function revealCard(cid: string) {
     await tick();
-    document.getElementById(`card-${c.id}`)?.scrollIntoView({ block: "nearest" });
+    const card = document.getElementById(`card-${cid}`);
+    const body = card?.closest<HTMLElement>(".sidebar-body");
+    if (card && body && body.scrollHeight > body.clientHeight) card.scrollIntoView({ block: "nearest" });
   }
 
   // ----- gutter (block / section comments) -----
@@ -562,14 +599,14 @@
   async function showInline(cid: string, ref: Ref) {
     if (!(await openPopover({ kind: "view", commentId: cid, ref }))) return;
     activeId = cid;
-    await tick();
-    document.getElementById(`card-${cid}`)?.scrollIntoView({ block: "nearest" });
+    await revealCard(cid);
   }
 
   /** Sidebar click: bring the commented text into view and mark it. */
   async function focusComment(cid: string) {
     if (!(await closePopover())) return;
     activeId = cid;
+    sheetOpen = false;
     const c = comments.find((x) => x.id === cid);
     if (!c || !current(c) || !articleEl) return;
     if (c.anchor.type === "document") {
@@ -624,7 +661,7 @@
       <article class="report" bind:this={articleEl} onmouseup={onArticleMouseUp} onclick={onArticleClick}>
         {@html version.html}
       </article>
-      {#if commenting && gutter}
+      {#if commenting && gutter && !touch.current}
         <button
           class="gutter-add sm icon"
           style="top: {gutter.top + 1}px"
@@ -661,15 +698,31 @@
     </div>
 
     {#if commenting}
-      <aside class="sidebar" class:picking={picked.size > 0} aria-label="评论">
+      {#if narrow.current}
+        {#if sheetOpen}
+          <div class="sheet-backdrop" role="presentation" onclick={() => (sheetOpen = false)}></div>
+        {:else}
+          <div class="mobile-bar">
+            <span class="bar-text">{barText}</span>
+            <button class:primary={barUrgent} onclick={() => (sheetOpen = true)}>评论 {comments.length}</button>
+          </div>
+        {/if}
+      {/if}
+      <aside class="sidebar" class:picking={picked.size > 0} class:open={sheetOpen} aria-label="评论">
         <div class="sidebar-head">
           <span class="head-title">评论</span>
           <span class="muted">{comments.length}</span>
           <span class="spacer"></span>
           <button class="ghost sm" onclick={startDocument}><Icon name="plus" size={14} />整篇评论</button>
-          <button class="ghost sm icon" title="收起评论（M）" aria-label="收起评论" aria-expanded="true" onclick={() => setMode("read")}>
-            <Icon name="chevrons-right" />
-          </button>
+          {#if narrow.current}
+            <button class="ghost sm icon" title="关闭" aria-label="关闭评论" onclick={() => (sheetOpen = false)}>
+              <Icon name="x" />
+            </button>
+          {:else}
+            <button class="ghost sm icon" title="收起评论（M）" aria-label="收起评论" aria-expanded="true" onclick={() => setMode("read")}>
+              <Icon name="chevrons-right" />
+            </button>
+          {/if}
         </div>
         {#if picked.size > 0}
           <div class="batchbar">
@@ -694,7 +747,7 @@
               review={reviewOf.get(c.id)}
               {ctx}
               reportId={id}
-              pickable={pickableComment(c)}
+              pickable={pickableComment(c) && !touch.current}
               picked={picked.has(c.id)}
               onpick={(on) => (on ? picked.add(c.id) : picked.delete(c.id))}
               onselect={() => focusComment(c.id)}
@@ -747,7 +800,11 @@
               {/if}
           {:else}
             <div class="empty">
-              选中正文文字即可评论；鼠标移到段落左侧点「＋」评论整段，移到标题左侧点「＋」评论整章。
+              {#if touch.current}
+                长按选中正文文字即可评论。
+              {:else}
+                选中正文文字即可评论；鼠标移到段落左侧点「＋」评论整段，移到标题左侧点「＋」评论整章。
+              {/if}
             </div>
           {/each}
         </div>

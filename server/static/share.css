@@ -35,5 +35,6 @@ body { color: #222; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC
 @media (max-width: 860px) {
   .share { display: block; padding: 1.25rem 1rem 4rem; }
   .toc-side { display: none; }
-  .toc-inline { display: block; position: static; max-height: none; margin-bottom: 1.5rem; border-bottom: 1px solid #e2e2e2; padding-bottom: 0.75rem; }
+  .share-head { margin-bottom: 1.25rem; }
+  .toc-inline { display: block; position: static; max-height: none; margin-bottom: 1.5rem; border-block: 1px solid #e2e2e2; padding: 0.75rem 0; }
 }

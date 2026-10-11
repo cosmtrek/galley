@@ -29,6 +29,10 @@
   </nav>
   {% endif %}
   <main>
+    <header class="share-head">
+      <h1 class="report-title">{{ title }}</h1>
+      <p class="share-meta">更新于 {{ updated }}</p>
+    </header>
     {% if !toc.is_empty() %}
     {# Without scripts the open state cannot follow the viewport, so narrow screens get their own collapsed copy. #}
     <nav class="toc toc-inline" aria-label="目录">
@@ -42,10 +46,6 @@
       </details>
     </nav>
     {% endif %}
-    <header class="share-head">
-      <h1 class="report-title">{{ title }}</h1>
-      <p class="share-meta">更新于 {{ updated }}</p>
-    </header>
     <article class="report">
 {{ html|safe }}
     </article>

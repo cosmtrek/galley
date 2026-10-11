@@ -282,7 +282,7 @@
   {:else}
     <PageHeader title="报告">
       {#snippet description()}
-        {active.length} 篇 · <span class="dot" class:ok={lastSeen !== null}></span>
+        <span class="dot" class:ok={lastSeen !== null}></span>
         {#if lastSeen === null}AI 从未连接{:else}AI 最近连接 {fmtAgo(lastSeen)}{/if} ·
         <button class="link" onclick={() => openDialog("ai", true)}>接入方法</button>
       {/snippet}

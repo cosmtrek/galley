@@ -220,12 +220,13 @@ details[open] > summary { margin-bottom: var(--sp-2); }
 
 .reports { list-style: none; margin: 0 0 var(--sp-3); padding: 0; }
 .list-tabs { margin-bottom: var(--sp-3); }
-.report-row { position: relative; padding: 14px 0; color: inherit; }
+/* The whole row is the link; hover tints it like the comment cards. The negative margin keeps text aligned with the page title. */
+.report-row { position: relative; padding: 14px var(--sp-3); margin: 0 calc(-1 * var(--sp-3)); color: inherit; }
+.report-row:hover { background: var(--bg-subtle); }
 .report-main { min-width: 0; display: grid; gap: 6px; }
 .report-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px 16px; }
 .report-row .report-title { font-weight: 600; font-size: var(--fs-md); color: inherit; text-decoration: none; }
 .report-row .report-title::after { content: ""; position: absolute; inset: 0; }
-.report-row .report-title:hover, .report-row:hover .report-title { text-decoration: underline; text-underline-offset: 3px; }
 .report-row .report-title:focus-visible { outline: 1px solid var(--fg); outline-offset: 2px; }
 .report-main .clamp { line-height: 1.6; }
 .report-meta { font-size: var(--fs-xs); }
@@ -478,14 +479,44 @@ pre.cmd { background: var(--code-bg); padding: var(--sp-3); overflow-x: auto; fo
   .paper, .workbench.reading .paper { padding: var(--sp-5) var(--sp-4) 120px; }
   /* Floats over the text here, so it needs the page color behind it. */
   .comment-tab { top: auto; bottom: var(--sp-5); background: var(--bg); }
-  .sidebar { position: static; height: auto; border-left: none; border-top: 1px solid var(--line); }
+  /* The sidebar turns into a sheet over the report, opened from the bottom bar, so the reader never leaves the text. */
+  .sidebar {
+    display: none;
+    position: fixed;
+    inset: auto 0 0;
+    z-index: 30;
+    align-self: auto;
+    height: auto;
+    max-height: calc(100dvh - var(--topbar-h) - var(--sp-6));
+    border-left: none;
+    border-top: 1px solid var(--line-strong);
+    background: var(--bg);
+    box-shadow: 0 -8px 28px rgba(0, 0, 0, 0.14);
+  }
+  .sidebar.open { display: flex; }
+  .sidebar-body { overscroll-behavior: contain; }
+  .sidebar-foot { padding-bottom: calc(var(--sp-3) + env(safe-area-inset-bottom)); }
+  .sheet-backdrop { position: fixed; inset: 0; z-index: 29; background: rgba(0, 0, 0, 0.3); }
+  .mobile-bar {
+    position: fixed;
+    inset: auto 0 0;
+    z-index: 25;
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    padding: var(--sp-2) var(--sp-4) calc(var(--sp-2) + env(safe-area-inset-bottom));
+    background: var(--bg);
+    border-top: 1px solid var(--line);
+  }
+  .mobile-bar .bar-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-muted); }
   .history { grid-template-columns: 1fr; }
 }
 /* The gutter "+" needs a left margin of its own; narrow pointer windows keep it, touch screens drop it. */
 @media (max-width: 860px) and (hover: hover) {
   .paper { padding-left: 48px; }
 }
-@media (max-width: 860px) and (hover: none) {
-  .gutter-add { display: none; }
+/* Touch screens have no hover, and tapping a card scrolls to its text, so controls revealed on hover stay visible. */
+@media (hover: none) {
+  .card-foot:not(.mine) button, .report-row .row-action { visibility: visible; }
 }
 .paper .report [data-block] { scroll-margin-top: calc(var(--topbar-h) + 48px); }
