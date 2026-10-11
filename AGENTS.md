@@ -25,6 +25,7 @@ cd web && corepack pnpm check && corepack pnpm test && corepack pnpm build
 cd server && cargo test && cargo build --release
 ```
 
+- 本地开发用 `scripts/dev.sh` 编译和重启服务（默认子命令 `restart`：构建工作台和服务端，再重启 Galley；`status`、`check`、`stop`、`logs`、`tunnel` 见脚本开头）。它通过 cloudflared 临时隧道对外，重启 Galley 时保留隧道和地址，并把地址作为 `GALLEY_PUBLIC_URL` 传给服务；只有 `tunnel` 子命令或隧道已退出时才会换地址。运行状态（pid、隧道地址、cloudflared 日志）在 `data/dev/`。多个会话共用这一份服务，不要手动 `kill` 或 `nohup` 启动 galley，一律走这个脚本（脚本加了锁，并发执行会排队）。
 - 使用 Rust 最新稳定版：`Dockerfile` 用浮动的 `rust:1-slim-bookworm`，CI 用 `stable`。最低版本是 1.99（`Cargo.toml` 的 `rust-version`，CI 会检查）；跟进新的稳定版时，同步改 `rust-version`、README 和 CI 的最低版本检查。
 - 部署只提供 `Dockerfile` 和 `docker-compose.yml`（用户在本地 `docker compose up -d --build`），不发布镜像和二进制。改了构建步骤（依赖、目录、嵌入的文件）要确认 `docker build` 仍能通过。
 - 服务端快照测试用 `insta`，快照在 `server/src/snapshots/`。输出确实应变时才更新快照，并在说明里写清原因。
