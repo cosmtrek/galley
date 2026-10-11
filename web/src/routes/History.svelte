@@ -4,6 +4,7 @@
   import { fmtTime } from "../lib/format";
   import type { Comparison, ReportInfo, VersionMeta } from "../lib/types";
   import TopBar from "../components/TopBar.svelte";
+  import PageHeader from "../components/PageHeader.svelte";
   import ChangeView from "../components/ChangeView.svelte";
   import { diffCtx, withoutPartners, type DiffCtx } from "../lib/diffctx";
 
@@ -61,8 +62,8 @@
 <TopBar {report} active="history" />
 {#if error}<div class="banner attention">{error}</div>{/if}
 
-<div class="page wide">
-  <h1>版本历史</h1>
+<div class="page">
+  <PageHeader title="版本历史" description="选两个版本对比改动，或回退到旧版本。回退会生成一个新版本，不会删除历史。" />
   <div class="history">
     <div>
       <h2>版本</h2>

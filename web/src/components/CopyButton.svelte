@@ -1,5 +1,6 @@
 <script lang="ts">
   import { copyText } from "../lib/clipboard";
+  import Icon from "./Icon.svelte";
 
   let {
     text,
@@ -21,4 +22,6 @@
   }
 </script>
 
-<button class:sm={small} {disabled} onclick={copy}>{state === "ok" ? "已复制" : state === "fail" ? "复制失败" : label}</button>
+<button class:sm={small} {disabled} onclick={copy}>
+  <Icon name={state === "ok" ? "check" : "copy"} size={small ? 14 : 16} />{state === "ok" ? "已复制" : state === "fail" ? "复制失败" : label}
+</button>

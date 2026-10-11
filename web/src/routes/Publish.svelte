@@ -6,6 +6,8 @@
   import type { Publication, ReportInfo } from "../lib/types";
   import TopBar from "../components/TopBar.svelte";
   import CopyButton from "../components/CopyButton.svelte";
+  import Icon from "../components/Icon.svelte";
+  import PageHeader from "../components/PageHeader.svelte";
   import { ask } from "../lib/confirm.svelte";
 
   let { id }: { id: string } = $props();
@@ -17,6 +19,7 @@
   // Action errors are shown inside the panel the action belongs to.
   let linkError = $state("");
   let manageError = $state("");
+  let dangerError = $state("");
   let busy = $state(false);
 
   async function load() {
@@ -51,6 +54,7 @@
   }
   const linkRun = (action: () => Promise<unknown>) => run((m) => (linkError = m), action);
   const manageRun = (action: () => Promise<unknown>) => run((m) => (manageError = m), action);
+  const dangerRun = (action: () => Promise<unknown>) => run((m) => (dangerError = m), action);
 
   async function publish() {
     if (
@@ -73,7 +77,7 @@
       confirmLabel: "停用",
       danger: true,
     });
-    if (ok) linkRun(() => post(`/api/publications/${active!.id}/revoke`));
+    if (ok) dangerRun(() => post(`/api/publications/${active!.id}/revoke`));
   }
 
   // ----- report management -----
@@ -107,7 +111,7 @@
       requireText: report.title,
     });
     if (ok)
-      manageRun(async () => {
+      dangerRun(async () => {
         await del(`/api/reports/${id}`);
         navigate("/app");
       });
@@ -118,105 +122,126 @@
 {#if error}<div class="banner attention">{error}</div>{/if}
 
 <div class="page">
-  <h1>发布</h1>
+  <PageHeader title="发布" description="把报告的某个版本发布成只读分享页，读者打开链接即可阅读，不用登录。" />
   {#if report}
     {#if report.archived_at}
       <div class="banner">已归档，只读。可在下方「报告管理」中恢复。</div>
     {/if}
-    {#if stale && active}
-      <div class="banner attention">
-        读者现在看到的还是 v{active.version_seq}，当前已经是 v{report.current_seq}。确认无误后更新分享页。
-      </div>
-    {/if}
-    {#if pendingCount > 0}
-      <div class="banner attention">
-        还有 {pendingCount} 条评论未解决或待验证（草稿 {report.counts.draft} 条不计）。可以照常发布，读者看不到任何评论。
-      </div>
-    {/if}
 
-    {#if active}
-      <div class="panel">
-        <h3>分享链接</h3>
-        <div class="row share-link">
-          <input type="text" readonly value={link} onfocus={(e) => (e.target as HTMLInputElement).select()} />
-          <CopyButton text={link} />
-          <a href={active.path} target="_blank" rel="noopener">打开 →</a>
+    <section class="panel stack">
+      <div class="panel-head">
+        <div class="grow">
+          <div class="status-title">
+            <span class="dot" class:ok={active && !stale} class:warn={stale}></span>
+            {#if !active}
+              尚未发布
+            {:else if stale}
+              分享页是 v{active.version_seq}，当前已是 v{report.current_seq}
+            {:else}
+              已发布 v{active.version_seq}，是当前版本
+            {/if}
+          </div>
+          <div class="muted small">
+            {#if !active}
+              发布 v{report.current_seq} 的快照并生成分享链接。之后的修改不会影响分享页，直到你更新发布。
+            {:else if stale}
+              更新后链接不变，读者刷新即可看到 v{report.current_seq}。
+            {:else}
+              之后的修改不会影响分享页，直到你更新发布。
+            {/if}
+          </div>
         </div>
-        <p class="small muted meta">
-          已发布 v{active.version_seq} · 更新于 {fmtTime(active.updated_at)} · 打开 {active.views} 次 · 最近访问 {fmtTime(active.last_viewed_at)}
-        </p>
-        <p class="small muted">链接不可猜测，读者免登录；不被搜索引擎收录；页面中没有评论、修改痕迹和版本历史。</p>
-        <div class="actions">
-          <span class="muted small spacer">
-            {active.version_id !== report.current_version_id ? "链接不变，读者刷新即可看到新版本。" : "已是当前版本，之后的修改不会影响分享页。"}
-          </span>
-          <button class="danger" disabled={busy} onclick={revoke}>停用链接</button>
-          {#if active.version_id !== report.current_version_id}
-            <button class="primary" disabled={busy} onclick={publish}>更新为当前版本 v{report.current_seq}</button>
-          {/if}
-        </div>
-        {#if linkError}<p class="error small">{linkError}</p>{/if}
+        {#if !active || stale}
+          <button class="primary" disabled={busy} onclick={publish}>
+            {active ? `更新为 v${report.current_seq}` : `发布 v${report.current_seq}`}
+          </button>
+        {/if}
       </div>
-    {:else}
-      <div class="panel">
-        <h3>尚未发布</h3>
-        <p class="muted">发布当前版本 v{report.current_seq} 的快照，生成一个分享链接。之后的修改不会影响分享页，直到你更新发布。</p>
-        <div class="actions">
-          <button class="primary" disabled={busy} onclick={publish}>发布 v{report.current_seq}</button>
+      {#if pendingCount > 0 && (!active || stale)}
+        <p class="note"><span class="dot warn"></span>还有 {pendingCount} 条评论未解决或待验证（草稿不计）。可以照常发布，读者看不到任何评论。</p>
+      {/if}
+
+      {#if active}
+        <div class="field">
+          <span class="field-label">分享链接</span>
+          <div class="row share-link">
+            <input type="text" readonly value={link} onfocus={(e) => (e.target as HTMLInputElement).select()} />
+            <CopyButton text={link} />
+            <a class="btn" href={active.path} target="_blank" rel="noopener"><Icon name="external" />打开</a>
+          </div>
         </div>
-        {#if linkError}<p class="error small">{linkError}</p>{/if}
-      </div>
-    {/if}
+        <dl class="stats">
+          <div><dt>打开次数</dt><dd>{active.views}</dd></div>
+          <div><dt>最近访问</dt><dd>{fmtTime(active.last_viewed_at)}</dd></div>
+          <div><dt>更新于</dt><dd>{fmtTime(active.updated_at)}</dd></div>
+        </dl>
+      {/if}
+      <p class="muted small panel-foot">链接不可猜测，读者免登录，不被搜索引擎收录；分享页不含评论、修改痕迹和版本历史。</p>
+      {#if linkError}<p class="error small">{linkError}</p>{/if}
+    </section>
 
     {#if revoked.length}
-      <h2>已停用的链接</h2>
-      <table class="list">
-        <thead><tr><th>链接</th><th>版本</th><th>打开次数</th><th>停用时间</th></tr></thead>
-        <tbody>
-          {#each revoked as p (p.id)}
-            <tr>
-              <td class="mono">{p.path}</td>
-              <td>v{p.version_seq}</td>
-              <td>{p.views}</td>
-              <td class="muted">{fmtTime(p.revoked_at)}</td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
+      <details class="revoked">
+        <summary>已停用的链接 · {revoked.length}</summary>
+        <table class="list">
+          <thead><tr><th>链接</th><th>版本</th><th>打开次数</th><th>停用时间</th></tr></thead>
+          <tbody>
+            {#each revoked as p (p.id)}
+              <tr>
+                <td class="mono">{p.path}</td>
+                <td>v{p.version_seq}</td>
+                <td>{p.views}</td>
+                <td class="muted">{fmtTime(p.revoked_at)}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </details>
     {/if}
 
     <h2>报告管理</h2>
-    <div class="panel manage">
-      {#if report.archived_at}
-        <div class="row">
-          <div>
-            <b>已归档</b>
-            <div class="muted small">归档于 {fmtTime(report.archived_at)}。恢复后可以继续评论和提交。</div>
-          </div>
-          <span class="spacer"></span>
+    <section class="panel settings">
+      <div class="setting">
+        <div>
+          <b>{report.archived_at ? "已归档" : "归档"}</b>
+          <span class="muted small">
+            {#if report.archived_at}
+              归档于 {fmtTime(report.archived_at)}。恢复后可以继续评论和提交。
+            {:else}
+              从列表移到「已归档」并变为只读，AI 之后交回的结果会被拒绝。分享链接继续有效。
+            {/if}
+          </span>
+        </div>
+        {#if report.archived_at}
           <button disabled={busy} onclick={unarchive}>恢复</button>
-        </div>
-        <div class="row danger">
-          <div>
-            <b>永久删除</b>
-            <div class="muted small">删除所有版本、评论、轮次和分享记录，不可恢复。</div>
-          </div>
-          <span class="spacer"></span>
-          <button class="danger" disabled={busy} onclick={remove}>永久删除</button>
-        </div>
-      {:else}
-        <div class="row">
-          <div>
-            <b>归档</b>
-            <div class="muted small">
-              从列表移到「已归档」，变为只读；AI 之后交回的结果会被拒绝。分享链接继续有效。删除需要先归档。
-            </div>
-          </div>
-          <span class="spacer"></span>
+        {:else}
           <button disabled={busy} onclick={archive}>归档</button>
+        {/if}
+      </div>
+      {#if manageError}<p class="error small setting-error">{manageError}</p>{/if}
+    </section>
+
+    <h2>不可撤销的操作</h2>
+    <section class="panel settings">
+      {#if active}
+        <div class="setting">
+          <div>
+            <b>停用分享链接</b>
+            <span class="muted small">链接永久失效（已打开 {active.views} 次），之后再发布会生成新链接。</span>
+          </div>
+          <button class="danger" disabled={busy} onclick={revoke}>停用链接</button>
         </div>
       {/if}
-      {#if manageError}<p class="error small">{manageError}</p>{/if}
-    </div>
+      <div class="setting">
+        <div>
+          <b>永久删除报告</b>
+          <span class="muted small">
+            删除所有版本、评论、轮次和分享记录。{report.archived_at ? "" : "需要先归档。"}
+          </span>
+        </div>
+        <button class="danger" disabled={busy || !report.archived_at} onclick={remove}>永久删除</button>
+      </div>
+      {#if dangerError}<p class="error small setting-error">{dangerError}</p>{/if}
+    </section>
   {/if}
 </div>

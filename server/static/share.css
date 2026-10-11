@@ -3,9 +3,10 @@ body { color: #222; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC
 
 .share {
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr);
+  /* Tailwind container scale like app.css (3xs 256 TOC, 6xl 1152 page); this page cannot read app.css variables. */
+  grid-template-columns: 256px minmax(0, 1fr);
   gap: 3rem;
-  max-width: 1100px;
+  max-width: 1152px;
   margin: 0 auto;
   padding: 3rem 1.5rem 6rem;
 }

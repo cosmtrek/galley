@@ -8,6 +8,8 @@
   import History from "./routes/History.svelte";
   import Publish from "./routes/Publish.svelte";
   import ConfirmDialog from "./components/ConfirmDialog.svelte";
+  import TopBar from "./components/TopBar.svelte";
+  import PageHeader from "./components/PageHeader.svelte";
 
   let auth = $state<"checking" | "in" | "out">("checking");
 
@@ -38,6 +40,10 @@
 {:else if route.name === "publish"}
   {#key route.id}<Publish id={route.id} />{/key}
 {:else}
-  <div class="page"><h1>页面不存在</h1><a href="/app">返回报告列表 →</a></div>
+  <TopBar />
+  <div class="page">
+    <PageHeader title="页面不存在" />
+    <a href="/app">返回报告列表 →</a>
+  </div>
 {/if}
 <ConfirmDialog />

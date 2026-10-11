@@ -34,17 +34,17 @@
   <span class="spacer"></span>
   {#if report}
     {#if report.active_round?.status === "verifying" && active !== "workbench"}
-      <a class="verify-chip" href="/app/r/{report.id}">
+      <a class="btn primary" href="/app/r/{report.id}">
         第 {report.active_round.seq} 轮待验证{#if verifyCount > 0}&nbsp;· {verifyCount}{/if}
       </a>
     {/if}
     <a
-      class="pub-btn"
+      class="btn"
       href="/app/r/{report.id}/publish"
       class:active={active === "publish"}
       title={stale ? `分享的是 v${pub?.version_seq}，当前 v${report.current_seq}` : pub ? `已分享 v${pub.version_seq}` : ""}
     >
-      发布{#if stale}<span class="stale">&nbsp;· 有更新</span>{/if}
+      发布{#if stale}<span class="stale">· 有更新</span>{/if}
     </a>
   {/if}
   {@render children?.()}

@@ -169,17 +169,17 @@
       {#if replying}
         <!-- the open composer below carries the actions -->
       {:else if comment.status === "draft"}
-        <button class="quiet sm" onclick={() => (editing = true)}>编辑</button>
-        <button class="quiet sm" onclick={remove}>删除</button>
+        <button class="ghost sm" onclick={() => (editing = true)}>编辑</button>
+        <button class="ghost sm" onclick={remove}>删除</button>
       {:else if comment.status === "open"}
-        <button class="quiet sm" onclick={() => toggle("message")}>补充说明</button>
+        <button class="ghost sm" onclick={() => toggle("message")}>补充说明</button>
       {:else if comment.status === "clarify"}
-        <button class="quiet sm" disabled={busy} onclick={resolve}>解决</button>
+        <button class="ghost sm" disabled={busy} onclick={resolve}>解决</button>
         <button class="primary sm" onclick={() => toggle("message")}>回复</button>
       {:else if comment.status === "resolved"}
-        <button class="quiet sm" disabled={busy} onclick={() => toggle("reopen")}>重新打开</button>
+        <button class="ghost sm" disabled={busy} onclick={() => toggle("reopen")}>重新打开</button>
       {:else}
-        <button class="quiet sm" disabled={busy} onclick={() => toggle("reopen")}>重新打开</button>
+        <button class="ghost sm" disabled={busy} onclick={() => toggle("reopen")}>重新打开</button>
         <button class="primary sm" disabled={busy} onclick={resolve}>解决</button>
       {/if}
     </div>

@@ -36,7 +36,7 @@
         </label>
       {/if}
       <div class="actions">
-        <button type="button" class="quiet" onclick={() => settle(false)}>取消</button>
+        <button type="button" class="ghost" onclick={() => settle(false)}>取消</button>
         <button type="submit" class="confirm {cur.danger ? 'danger' : 'primary'}" disabled={!ready}>{cur.confirmLabel ?? "确定"}</button>
       </div>
     </form>

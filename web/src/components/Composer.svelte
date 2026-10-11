@@ -72,7 +72,7 @@
   <textarea bind:this={textarea} bind:value={body} onkeydown={keydown} {placeholder} rows="2"></textarea>
   {#if error}<p class="error small">{error}</p>{/if}
   <div class="actions">
-    <button class="quiet sm" onclick={oncancel}>取消</button>
+    <button class="ghost sm" onclick={oncancel}>取消</button>
     <button class="primary sm" disabled={(!allowEmpty && !body.trim()) || busy} onclick={save}>{saveLabel}</button>
   </div>
 </div>

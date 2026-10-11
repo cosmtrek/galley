@@ -14,6 +14,7 @@
   import Outline from "../components/Outline.svelte";
   import CommentCard from "../components/CommentCard.svelte";
   import Composer from "../components/Composer.svelte";
+  import Icon from "../components/Icon.svelte";
 
   let { id }: { id: string } = $props();
 
@@ -61,7 +62,9 @@
     for (const c of comments) m.set(c.status, (m.get(c.status) ?? 0) + 1);
     return m;
   });
-  const unresolvedCount = $derived(comments.length - (statusCounts.get("resolved") ?? 0));
+  const tabTitle = $derived(
+    ["展开评论（M）", ...STATUS_ORDER.filter((s) => statusCounts.get(s)).map((s) => `${STATUS_LABEL[s]} ${statusCounts.get(s)}`)].join("\n"),
+  );
   const blockIndex = $derived(new Map((version?.doc.blocks ?? []).map((b, i) => [b.id, i])));
   const shown = $derived(
     comments
@@ -477,13 +480,7 @@
     if (ok) activeId = null;
   }
 
-  async function startSection(sectionId: string | null) {
-    if (mode !== "comment") await setMode("comment");
-    if (sectionId !== null) {
-      articleEl?.querySelector(`[data-block="${sectionId}"]`)?.scrollIntoView({ block: "center" });
-      startBlock(sectionId, true);
-      return;
-    }
+  async function startDocument() {
     if (!titleEl) return;
     titleEl.scrollIntoView({ block: "center" });
     if (await openPopover({ kind: "compose", anchor: { type: "document" }, label: "整篇评论", ref: titleEl, range: null }))
@@ -583,11 +580,7 @@
     target?.scrollIntoView({ block: "center" });
   }
 
-  function jump(sectionId: string | null) {
-    if (!sectionId) {
-      window.scrollTo({ top: 0 });
-      return;
-    }
+  function jump(sectionId: string) {
     articleEl?.querySelector(`[data-block="${sectionId}"]`)?.scrollIntoView({ block: "start" });
   }
 
@@ -622,7 +615,7 @@
 {#if version && report}
   {@html markerCss}
   <div class="workbench" class:reading={!commenting}>
-    <Outline blocks={version.doc.blocks} {comments} editable={commenting} onjump={jump} onadd={startSection} />
+    <Outline blocks={version.doc.blocks} {comments} showCounts={commenting} onjump={jump} />
 
     <div class="paper" bind:this={paperEl} onmousemove={onMouseMove} onmouseleave={() => (gutter = null)} role="presentation">
       <div class="report"><h1 class="report-title" bind:this={titleEl}>{version.doc.title}</h1></div>
@@ -633,10 +626,11 @@
       </article>
       {#if commenting && gutter}
         <button
-          class="gutter-add"
-          style="top: {gutter.top + 4}px"
+          class="gutter-add sm icon"
+          style="top: {gutter.top + 1}px"
           title={gutter.heading ? "评论整章" : "评论整段"}
-          onclick={() => gutter && startBlock(gutter.blockId, gutter.heading)}>＋</button>
+          aria-label={gutter.heading ? "评论整章" : "评论整段"}
+          onclick={() => gutter && startBlock(gutter.blockId, gutter.heading)}><Icon name="plus" /></button>
       {/if}
       {#if pop}
         <div class="pop" bind:this={popEl} role="dialog" aria-label={pop.kind === "compose" ? "写评论" : "评论"}>
@@ -672,14 +666,16 @@
           <span class="head-title">评论</span>
           <span class="muted">{comments.length}</span>
           <span class="spacer"></span>
-          <button class="quiet sm" onclick={() => startSection(null)}>＋ 整篇评论</button>
-          <button class="quiet sm" title="收起评论栏，进入阅读模式（M）" onclick={() => setMode("read")}>收起</button>
+          <button class="ghost sm" onclick={startDocument}><Icon name="plus" size={14} />整篇评论</button>
+          <button class="ghost sm icon" title="收起评论（M）" aria-label="收起评论" aria-expanded="true" onclick={() => setMode("read")}>
+            <Icon name="chevrons-right" />
+          </button>
         </div>
         {#if picked.size > 0}
           <div class="batchbar">
             <span class="muted small">已选 {picked.size} 条</span>
             <span class="spacer"></span>
-            <button class="quiet sm" onclick={() => picked.clear()}>取消</button>
+            <button class="ghost sm" onclick={() => picked.clear()}>取消</button>
             {#if toDelete.length}
               <button class="danger sm" disabled={batchBusy} onclick={batchDelete}>删除草稿</button>
             {/if}
@@ -730,7 +726,7 @@
                     <div class="card-foot mine" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="presentation">
                       <span class="card-status">待确认</span>
                       <span class="spacer"></span>
-                      <button class="quiet sm" disabled={batchBusy} title="生成一条草稿评论，随下一轮交给 AI 改回去" onclick={() => revertExtra(ch)}>改回去</button>
+                      <button class="ghost sm" disabled={batchBusy} title="生成一条草稿评论，随下一轮交给 AI 改回去" onclick={() => revertExtra(ch)}>改回去</button>
                       <button class="primary sm" disabled={batchBusy} onclick={() => confirmExtra(ch)}>确认</button>
                     </div>
                   </div>
@@ -751,7 +747,7 @@
               {/if}
           {:else}
             <div class="empty">
-              选中正文文字即可评论；鼠标移到段落左侧点「＋」评论整段；在左侧大纲评论整章。
+              选中正文文字即可评论；鼠标移到段落左侧点「＋」评论整段，移到标题左侧点「＋」评论整章。
             </div>
           {/each}
         </div>
@@ -802,22 +798,16 @@
         {/if}
       </aside>
     {:else}
-      <aside class="rail" aria-label="评论概况">
-        <button class="rail-btn" title="切换到评论模式（M）" disabled={archived} onclick={() => setMode("comment")}>
-          <span class="rail-item"><b>{unresolvedCount}</b>未解决</span>
-          {#each STATUS_ORDER as s (s)}
-            {#if statusCounts.get(s)}
-              <span class="rail-item s-{s}"><b>{statusCounts.get(s)}</b>{STATUS_LABEL[s]}</span>
-            {/if}
-          {/each}
-          {#if round}
-            <span class="rail-item round"><b>第{round.seq}轮</b><span class:accent={round.status === "verifying"}>{round.status === "verifying" ? "待验证" : round.status === "processing" ? "处理中" : "等待 AI"}</span></span>
-          {:else if submittable > 0}
-            <span class="rail-item"><b>{submittable}</b>待提交</span>
-          {/if}
-          {#if !archived}<span class="rail-go">展开</span>{/if}
-        </button>
-      </aside>
+      <button
+        class="comment-tab ghost sm icon"
+        title={archived ? "已归档，只读" : tabTitle}
+        aria-label="展开评论"
+        aria-expanded="false"
+        disabled={archived}
+        onclick={() => setMode("comment")}
+      >
+        <Icon name="message" />
+      </button>
     {/if}
   </div>
 {:else if !error}

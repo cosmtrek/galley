@@ -7,6 +7,8 @@
   import TopBar from "../components/TopBar.svelte";
   import AgentConnect from "../components/AgentConnect.svelte";
   import CopyButton from "../components/CopyButton.svelte";
+  import Icon from "../components/Icon.svelte";
+  import PageHeader from "../components/PageHeader.svelte";
   import example from "../../../examples/energy-storage-2026.md?raw";
 
   interface Meta {
@@ -226,7 +228,7 @@
   <div class="sec">
     <div class="row">
       <button onclick={() => fileInput?.click()}>选择 .md 文件</button>
-      <button class="quiet" onclick={() => { markdown = example; fileName = "示例报告"; }}>填入示例报告</button>
+      <button class="ghost" onclick={() => { markdown = example; fileName = "示例报告"; }}>填入示例报告</button>
     </div>
     <p class="muted small">
       {#if fileName}已读入「{fileName}」，确认无误后创建。{:else}把 .md 文件拖到这里、选择文件，或直接粘贴 Markdown，创建后作为 v1。{/if}
@@ -234,13 +236,13 @@
   </div>
   <textarea rows="12" bind:value={markdown} placeholder={"---\ntitle: 报告标题\nsummary: 一句话摘要\n---\n\n## 一、第一章\n\n正文……"}></textarea>
   <div class="actions">
-    <button class="quiet" onclick={() => dlg?.close()}>取消</button>
+    <button class="ghost" onclick={() => dlg?.close()}>取消</button>
     <button class="primary" disabled={!markdown.trim()} onclick={create}>创建</button>
   </div>
 {/snippet}
 
 <TopBar>
-  <button class="quiet" onclick={logout}>退出</button>
+  <button class="ghost" onclick={logout}>退出</button>
 </TopBar>
 
 <input
@@ -278,16 +280,16 @@
       </p>
     </div>
   {:else}
-    <div class="row list-head">
-      <h1>报告</h1>
-      <span class="spacer"></span>
-      <button class="primary" onclick={() => openDialog("ai")}>＋ 添加报告</button>
-    </div>
-    <p class="muted list-sub">
-      {active.length} 篇 · <span class="dot" class:ok={lastSeen !== null}></span>
-      {#if lastSeen === null}AI 从未连接{:else}AI 最近连接 {fmtAgo(lastSeen)}{/if} ·
-      <button class="link" onclick={() => openDialog("ai", true)}>接入方法</button>
-    </p>
+    <PageHeader title="报告">
+      {#snippet description()}
+        {active.length} 篇 · <span class="dot" class:ok={lastSeen !== null}></span>
+        {#if lastSeen === null}AI 从未连接{:else}AI 最近连接 {fmtAgo(lastSeen)}{/if} ·
+        <button class="link" onclick={() => openDialog("ai", true)}>接入方法</button>
+      {/snippet}
+      {#snippet actions()}
+        <button class="primary" onclick={() => openDialog("ai")}><Icon name="plus" />添加报告</button>
+      {/snippet}
+    </PageHeader>
     {#if archived.length > 0}
       <div class="utabs list-tabs">
         <button class:on={filter === "all"} onclick={() => setFilter("all")}>全部 {active.length}</button>
@@ -323,7 +325,7 @@
                 <div class="report-head">
                   <a class="report-title" href="/app/r/{r.id}">{r.title}</a>
                   {#if a?.kind === "verify"}
-                    <a class="act-tag" href="/app/r/{r.id}">待验证 {a.n} 条 →</a>
+                    <a class="btn primary sm" href="/app/r/{r.id}">待验证 {a.n} 条 →</a>
                   {:else if a?.kind === "wait"}
                     <span class="act-wait"><span class="dot warn"></span>等待 AI</span>
                   {:else if a?.kind === "todo"}
@@ -355,7 +357,7 @@
   <div class="row dlg-head">
     <h2>添加报告</h2>
     <span class="spacer"></span>
-    <button class="quiet sm" onclick={() => dlg?.close()} aria-label="关闭">✕</button>
+    <button class="ghost sm icon" onclick={() => dlg?.close()} aria-label="关闭" title="关闭"><Icon name="x" /></button>
   </div>
   <div class="utabs dlg-tabs">
     <button class:on={addTab === "ai"} onclick={() => (addTab = "ai")}>让 AI 发过来</button>
