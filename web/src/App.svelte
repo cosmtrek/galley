@@ -10,6 +10,7 @@
   import ConfirmDialog from "./components/ConfirmDialog.svelte";
   import TopBar from "./components/TopBar.svelte";
   import PageHeader from "./components/PageHeader.svelte";
+  import Logo from "./components/Logo.svelte";
 
   let auth = $state<"checking" | "in" | "out">("checking");
 
@@ -28,7 +29,8 @@
 </script>
 
 {#if auth === "checking"}
-  <div class="empty">加载中…</div>
+  <!-- The page layout is unknown until auth settles (login or app), so only the mark shows. -->
+  <div class="boot skeleton" role="status" aria-label="正在加载"><Logo /></div>
 {:else if auth === "out"}
   <Login onlogin={() => (auth = "in")} />
 {:else if route.name === "reports"}

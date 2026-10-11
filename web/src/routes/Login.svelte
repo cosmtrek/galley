@@ -28,7 +28,7 @@
   <form onsubmit={submit}>
     <!-- svelte-ignore a11y_autofocus -->
     <input type="password" placeholder="密码" bind:value={password} autofocus autocomplete="current-password" />
-    <button class="primary" disabled={busy || !password}>登录</button>
+    <button class="primary" disabled={busy || !password} aria-busy={busy}>登录</button>
     {#if error}<div class="error">{error}</div>{/if}
   </form>
   <p class="muted small hint">

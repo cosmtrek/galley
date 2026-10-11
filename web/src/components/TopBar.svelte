@@ -5,9 +5,10 @@
 
   let {
     report = null,
+    loading = false,
     active = "",
     children,
-  }: { report?: ReportInfo | null; active?: string; children?: Snippet } = $props();
+  }: { report?: ReportInfo | null; loading?: boolean; active?: string; children?: Snippet } = $props();
 
   const verifyCount = $derived(report ? report.counts.verify : 0);
   const pub = $derived(report?.publication ?? null);
@@ -30,6 +31,8 @@
       class:active={active === "history"}
       aria-current={active === "history" ? "page" : undefined}>v{report.current_seq}</a
     >
+  {:else if loading}
+    <span class="crumb skeleton" aria-hidden="true"><span class="muted">/</span><span class="sk"></span></span>
   {/if}
   <span class="spacer"></span>
   {#if report}

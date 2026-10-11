@@ -15,6 +15,8 @@
   import CommentCard from "../components/CommentCard.svelte";
   import Composer from "../components/Composer.svelte";
   import Icon from "../components/Icon.svelte";
+  import Skeleton from "../components/Skeleton.svelte";
+  import LoadError from "../components/LoadError.svelte";
 
   let { id }: { id: string } = $props();
 
@@ -40,7 +42,9 @@
   let composerDirty = $state(false);
   let gutter = $state<{ top: number; blockId: string; heading: boolean } | null>(null);
   let submitting = $state(false);
-  let batchBusy = $state(false);
+  // Which sidebar action is running ("" when none); only that button shows the spinner, the rest are disabled.
+  let busyKey = $state("");
+  const batchBusy = $derived(busyKey !== "");
   const picked = new SvelteSet<string>();
   // Below this width the sidebar becomes a sheet opened from the bottom bar; keep in sync with app.css.
   const narrow = new MediaQuery("max-width: 860px");
@@ -107,6 +111,7 @@
   // ----- round under verification: what changed -----
 
   let review = $state<Review | null>(null);
+  let reviewLoading = $state(false);
   let ctx = $state<DiffCtx | null>(null);
   // A string key, so reloading the report does not refetch an unchanged round.
   const verifyKey = $derived(
@@ -116,6 +121,7 @@
     const key = verifyKey;
     review = null;
     ctx = null;
+    reviewLoading = !!key;
     if (!key) return;
     const [rid, base, result] = key.split("|");
     let stale = false;
@@ -128,7 +134,10 @@
         review = r;
         ctx = c;
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        if (!stale) reviewLoading = false;
+      });
     return () => (stale = true);
   });
   const reviewOf = $derived(new Map<string, ReviewItem>((review?.items ?? []).map((it) => [it.comment.id, it])));
@@ -167,31 +176,32 @@
         ? "这段是新增的，我不需要，请删掉。"
         : "这段被删掉了，请恢复。";
 
-  async function runExtra(fn: (rid: string) => Promise<unknown>) {
+  // The button stays busy until the reload lands, so it does not flash back before the list changes.
+  async function runExtra(key: string, fn: (rid: string) => Promise<unknown>) {
     if (!round) return;
-    batchBusy = true;
+    busyKey = key;
     actionError = "";
     try {
       await fn(round.id);
     } catch (e) {
       actionError = (e as Error).message;
     } finally {
-      batchBusy = false;
       await load();
+      busyKey = "";
     }
   }
   const confirmExtra = (ch: ExtraChange) =>
-    runExtra(async (rid) => {
+    runExtra(`confirm:${ch.block_id}`, async (rid) => {
       for (const b of pairIds(ch)) await post(`/api/rounds/${rid}/extra/confirm`, { block_id: b });
     });
   async function confirmAllExtra() {
     const n = extraPending.length;
     if (await ask({ title: `确认全部 ${n} 处评论之外的改动？`, message: "确认后这些改动会保留在报告里。", confirmLabel: "全部确认" }))
-      runExtra((rid) => post(`/api/rounds/${rid}/extra/confirm`, {}));
+      runExtra("confirm-all", (rid) => post(`/api/rounds/${rid}/extra/confirm`, {}));
   }
   // The draft comment it creates shows up under 草稿, where it can still be edited before submitting.
   const revertExtra = (ch: ExtraChange) =>
-    runExtra((rid) => post(`/api/rounds/${rid}/extra/revert`, { block_ids: pairIds(ch), body: revertBody(ch) }));
+    runExtra(`revert:${ch.block_id}`, (rid) => post(`/api/rounds/${rid}/extra/revert`, { block_ids: pairIds(ch), body: revertBody(ch) }));
 
   function focusExtra(ch: ExtraChange) {
     sheetOpen = false;
@@ -222,21 +232,21 @@
     for (const pid of [...picked]) if (!valid.has(pid)) picked.delete(pid);
   });
 
-  async function runBatch(list: Comment[], fn: (c: Comment) => Promise<unknown>) {
-    batchBusy = true;
+  async function runBatch(key: string, list: Comment[], fn: (c: Comment) => Promise<unknown>) {
+    busyKey = key;
     actionError = "";
     try {
       for (const c of list) await fn(c);
     } catch (e) {
       actionError = (e as Error).message;
     } finally {
-      picked.clear();
-      batchBusy = false;
       await load();
+      picked.clear();
+      busyKey = "";
     }
   }
 
-  async function resolveMany(list: Comment[]) {
+  async function resolveMany(key: string, list: Comment[]) {
     if (!list.length) return;
     const clarify = list.filter((c) => c.status === "clarify").length;
     const ok = await ask({
@@ -244,22 +254,24 @@
       message: clarify ? `其中 ${clarify} 条是 AI 提出的疑问，还没有回复。` : undefined,
       confirmLabel: "解决",
     });
-    if (ok) runBatch(list, (c) => post(`/api/comments/${c.id}/resolve`));
+    if (ok) runBatch(key, list, (c) => post(`/api/comments/${c.id}/resolve`));
   }
 
   async function batchDelete() {
     const list = toDelete;
     if (!list.length) return;
     if (await ask({ title: `删除 ${list.length} 条草稿评论？`, message: "删除后无法恢复。", confirmLabel: "删除", danger: true }))
-      runBatch(list, (c) => api("DELETE", `/api/comments/${c.id}`));
+      runBatch("delete", list, (c) => api("DELETE", `/api/comments/${c.id}`));
   }
 
   // ----- loading -----
 
   async function load() {
     try {
-      const r = await get<{ report: ReportInfo; version: Version }>(`/api/reports/${id}`);
-      const cs = await get<Comment[]>(`/api/reports/${id}/comments`);
+      const [r, cs] = await Promise.all([
+        get<{ report: ReportInfo; version: Version }>(`/api/reports/${id}`),
+        get<Comment[]>(`/api/reports/${id}/comments`),
+      ]);
       report = r.report;
       version = r.version;
       comments = cs;
@@ -267,6 +279,11 @@
     } catch (e) {
       error = (e as Error).message;
     }
+  }
+
+  function retry() {
+    error = "";
+    load();
   }
 
   async function refreshRound() {
@@ -642,12 +659,40 @@
   onselectionchange={onSelectionChange}
 />
 
-<TopBar {report} active="workbench" />
+<TopBar {report} loading={!report && !error} active="workbench" />
 
 {#if report && archived}
   <div class="banner">已归档，只读。<a href="/app/r/{id}/publish">到发布页恢复 →</a></div>
 {/if}
-{#if error}<div class="banner attention">{error}</div>{/if}
+{#if error && version}<div class="banner attention">{error}</div>{/if}
+
+{#snippet skeleton()}
+  <div class="workbench skeleton" class:reading={mode === "read"} role="status" aria-label="正在加载报告">
+    <div class="outline" aria-hidden="true">
+      <div class="outline-head">目录</div>
+      <div class="outline-sk"><Skeleton lines={6} /></div>
+    </div>
+    <div class="paper" aria-hidden="true">
+      <div class="report">
+        <div class="report-title"><span class="sk w60"></span></div>
+        {#each [4, 3, 5] as n, i (i)}<div class="sk-para"><Skeleton lines={n} /></div>{/each}
+      </div>
+    </div>
+    {#if mode === "comment"}
+      <aside class="sidebar" aria-hidden="true">
+        <div class="sidebar-head"><span class="head-title">评论</span></div>
+        <div class="sidebar-body">
+          {#each { length: 2 }, i (i)}
+            <div class="card">
+              <div class="body"><Skeleton lines={2} /></div>
+              <span class="sk w40 card-loc"></span>
+            </div>
+          {/each}
+        </div>
+      </aside>
+    {/if}
+  </div>
+{/snippet}
 
 {#if version && report}
   {@html markerCss}
@@ -688,6 +733,7 @@
               block={anchorBlock(popComment)}
               review={reviewOf.get(popComment.id)}
               {ctx}
+              {reviewLoading}
               reportId={id}
               onselect={() => {}}
               onchanged={load}
@@ -730,10 +776,10 @@
             <span class="spacer"></span>
             <button class="ghost sm" onclick={() => picked.clear()}>取消</button>
             {#if toDelete.length}
-              <button class="danger sm" disabled={batchBusy} onclick={batchDelete}>删除草稿</button>
+              <button class="danger sm" disabled={batchBusy} aria-busy={busyKey === "delete"} onclick={batchDelete}>删除草稿</button>
             {/if}
             {#if toResolve.length}
-              <button class="primary sm" disabled={batchBusy} onclick={() => resolveMany(toResolve)}>解决</button>
+              <button class="primary sm" disabled={batchBusy} aria-busy={busyKey === "resolve-picked"} onclick={() => resolveMany("resolve-picked", toResolve)}>解决</button>
             {/if}
           </div>
         {/if}
@@ -746,6 +792,7 @@
               block={anchorBlock(c)}
               review={reviewOf.get(c.id)}
               {ctx}
+              {reviewLoading}
               reportId={id}
               pickable={pickableComment(c) && !touch.current}
               picked={picked.has(c.id)}
@@ -764,7 +811,7 @@
                 <div class="group-head">
                   <span>{g.label} · {extraPending.length}</span>
                   <span class="spacer"></span>
-                  <button class="link" disabled={batchBusy} onclick={confirmAllExtra}>全部确认</button>
+                  <button class="link" disabled={batchBusy} aria-busy={busyKey === "confirm-all"} onclick={confirmAllExtra}>全部确认</button>
                 </div>
                 {#each extraPending as ch (ch.op + ch.block_id)}
                   <div
@@ -779,8 +826,14 @@
                     <div class="card-foot mine" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="presentation">
                       <span class="card-status">待确认</span>
                       <span class="spacer"></span>
-                      <button class="ghost sm" disabled={batchBusy} title="生成一条草稿评论，随下一轮交给 AI 改回去" onclick={() => revertExtra(ch)}>改回去</button>
-                      <button class="primary sm" disabled={batchBusy} onclick={() => confirmExtra(ch)}>确认</button>
+                      <button
+                        class="ghost sm"
+                        disabled={batchBusy}
+                        aria-busy={busyKey === `revert:${ch.block_id}`}
+                        title="生成一条草稿评论，随下一轮交给 AI 改回去"
+                        onclick={() => revertExtra(ch)}>改回去</button
+                      >
+                      <button class="primary sm" disabled={batchBusy} aria-busy={busyKey === `confirm:${ch.block_id}`} onclick={() => confirmExtra(ch)}>确认</button>
                     </div>
                   </div>
                 {/each}
@@ -789,7 +842,7 @@
                   <span>{g.label} · {g.items.length}</span>
                   <span class="spacer"></span>
                   {#if verifyList.length > 1}
-                    <button class="link" disabled={batchBusy} onclick={() => resolveMany(verifyList)}>全部解决</button>
+                    <button class="link" disabled={batchBusy} aria-busy={busyKey === "resolve-all"} onclick={() => resolveMany("resolve-all", verifyList)}>全部解决</button>
                   {/if}
                 </div>
               {/if}
@@ -831,7 +884,7 @@
                 {/if}
               {:else}
                 <div class="foot-line">
-                  <span class="dot {round.status === 'processing' ? 'ok' : 'warn'}"></span>
+                  <span class="dot live {round.status === 'processing' ? 'ok' : 'warn'}"></span>
                   第 {round.seq} 轮 · {round.status === "submitted" ? "等待 AI" : "AI 处理中"}
                   <span class="spacer"></span>
                   <span class="muted small">
@@ -848,7 +901,7 @@
               <div class="foot-line">
                 <span>{submittable} 条评论待提交</span>
                 <span class="spacer"></span>
-                <button class="primary" disabled={submitting} onclick={submitRound}>提交本轮</button>
+                <button class="primary" disabled={submitting} aria-busy={submitting} onclick={submitRound}>提交本轮</button>
               </div>
             {/if}
           </div>
@@ -867,6 +920,8 @@
       </button>
     {/if}
   </div>
-{:else if !error}
-  <div class="empty">加载中…</div>
+{:else if error}
+  <div class="page"><LoadError message={error} onretry={retry} /></div>
+{:else}
+  {@render skeleton()}
 {/if}

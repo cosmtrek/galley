@@ -9,6 +9,8 @@
   import CopyButton from "../components/CopyButton.svelte";
   import Icon from "../components/Icon.svelte";
   import PageHeader from "../components/PageHeader.svelte";
+  import Skeleton from "../components/Skeleton.svelte";
+  import LoadError from "../components/LoadError.svelte";
   import example from "../../../examples/energy-storage-2026.md?raw";
 
   interface Meta {
@@ -21,6 +23,10 @@
 
   let reports = $state<ReportInfo[] | null>(null);
   let error = $state("");
+  let loadError = $state("");
+  let creating = $state(false);
+  let unarchiving = $state<string | null>(null);
+  let loggingOut = $state(false);
   let markdown = $state("");
   let fileName = $state("");
   let dragging = $state(false);
@@ -49,11 +55,12 @@
   }
 
   async function load() {
+    loadError = "";
     try {
-      await loadReports();
-      await loadMeta();
+      await Promise.all([loadReports(), loadMeta()]);
     } catch (e) {
-      error = (e as Error).message;
+      if (reports === null) loadError = (e as Error).message;
+      else error = (e as Error).message;
       return;
     }
     const f = new URLSearchParams(location.search).get("f");
@@ -72,12 +79,15 @@
   }
 
   async function create() {
+    creating = true;
     try {
       const r = await post<ReportInfo>("/api/reports", { markdown });
       dlg?.close();
       navigate(`/app/r/${r.id}`);
     } catch (e) {
       error = (e as Error).message;
+    } finally {
+      creating = false;
     }
   }
 
@@ -114,8 +124,14 @@
   }
 
   async function logout() {
-    await post("/api/logout");
-    location.reload();
+    loggingOut = true;
+    try {
+      await post("/api/logout");
+      location.reload();
+    } catch (e) {
+      error = (e as Error).message;
+      loggingOut = false;
+    }
   }
 
   let filter = $state<"all" | "archived">("all");
@@ -128,12 +144,15 @@
   }
 
   async function unarchive(r: ReportInfo) {
+    unarchiving = r.id;
     try {
       await post(`/api/reports/${r.id}/unarchive`);
       await loadReports();
       if (archived.length === 0 && filter === "archived") setFilter("all");
     } catch (e) {
       error = (e as Error).message;
+    } finally {
+      unarchiving = null;
     }
   }
 
@@ -173,12 +192,29 @@
     <CopyButton text={PROMPT} />
   </div>
   {#if received.length === 0}
-    <p class="note"><span class="dot warn"></span>等待 AI 发来报告…</p>
+    <p class="note"><span class="dot warn live"></span>等待 AI 发来报告…</p>
   {:else}
     {#each received as r (r.id)}
       <p class="note"><span class="dot ok"></span>已收到「{r.title}」<a href="/app/r/{r.id}">打开 →</a></p>
     {/each}
   {/if}
+{/snippet}
+
+{#snippet skeleton()}
+  <div class="skeleton" role="status" aria-label="正在加载报告列表">
+    <div class="page-head" aria-hidden="true"><span class="sk w25 sk-xl"></span></div>
+    <ul class="reports" aria-hidden="true">
+      {#each { length: 4 }, i (i)}
+        <li class="report-row">
+          <div class="report-main">
+            <span class="sk w40 report-title"></span>
+            <div class="small"><Skeleton lines={1} /></div>
+            <span class="sk w25 report-meta"></span>
+          </div>
+        </li>
+      {/each}
+    </ul>
+  </div>
 {/snippet}
 
 {#snippet sharePart(r: ReportInfo)}
@@ -197,7 +233,7 @@
     <section class="step-sec">
       <h3 class="step-title">
         <span class="step-num">1</span>接入 AI
-        <span class="step-status"><span class="dot warn"></span>等待连接…</span>
+        <span class="step-status"><span class="dot warn live"></span>等待连接…</span>
       </h3>
       <AgentConnect {publicUrl} {token} />
     </section>
@@ -231,12 +267,12 @@
   <div class="actions">
     <span class="note spacer">创建后作为 v1。</span>
     <button class="ghost" onclick={() => dlg?.close()}>取消</button>
-    <button class="primary" disabled={!markdown.trim()} onclick={create}>创建</button>
+    <button class="primary" disabled={!markdown.trim() || creating} aria-busy={creating} onclick={create}>创建</button>
   </div>
 {/snippet}
 
 <TopBar>
-  <button class="ghost" onclick={logout}>退出</button>
+  <button class="ghost" disabled={loggingOut} aria-busy={loggingOut} onclick={logout}>退出</button>
 </TopBar>
 
 <input
@@ -262,8 +298,10 @@
 >
   {#if error && !addOpen}<p class="error">{error}</p>{/if}
 
-  {#if reports === null}
-    <div class="empty">加载中…</div>
+  {#if reports === null && loadError}
+    <LoadError message={loadError} onretry={load} back={false} />
+  {:else if reports === null}
+    {@render skeleton()}
   {:else if reports.length === 0}
     <div class="panel empty-start">
       <h1>还没有报告</h1>
@@ -295,7 +333,12 @@
               <div class="report-main">
                 <div class="report-head">
                   <a class="report-title" href="/app/r/{r.id}">{r.title}</a>
-                  <button class="sm row-action" onclick={() => unarchive(r)}>恢复</button>
+                  <button
+                    class="sm row-action"
+                    disabled={unarchiving !== null}
+                    aria-busy={unarchiving === r.id}
+                    onclick={() => unarchive(r)}>恢复</button
+                  >
                 </div>
                 {#if r.summary}<div class="muted small clamp">{r.summary}</div>{/if}
                 <div class="muted report-meta">归档于 {fmtTime(r.archived_at)} · v{r.current_seq}{@render sharePart(r)}</div>
@@ -316,7 +359,7 @@
                   {#if a?.kind === "verify"}
                     <a class="btn primary sm" href="/app/r/{r.id}">待验证 {a.n} 条 →</a>
                   {:else if a?.kind === "wait"}
-                    <span class="act-wait"><span class="dot warn"></span>等待 AI</span>
+                    <span class="act-wait"><span class="dot warn live"></span>等待 AI</span>
                   {:else if a?.kind === "todo"}
                     <span class="act-todo">{a.text}</span>
                   {/if}

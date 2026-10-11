@@ -8,6 +8,8 @@
   import CopyButton from "../components/CopyButton.svelte";
   import Icon from "../components/Icon.svelte";
   import PageHeader from "../components/PageHeader.svelte";
+  import Skeleton from "../components/Skeleton.svelte";
+  import LoadError from "../components/LoadError.svelte";
   import { ask } from "../lib/confirm.svelte";
 
   let { id }: { id: string } = $props();
@@ -20,13 +22,21 @@
   let linkError = $state("");
   let manageError = $state("");
   let dangerError = $state("");
-  let busy = $state(false);
+  type Action = "publish" | "archive" | "unarchive" | "revoke" | "delete";
+  // The running action: its button shows the spinner, every other action waits.
+  let busy = $state<Action | null>(null);
 
   async function load() {
+    error = "";
     try {
-      report = (await get<{ report: ReportInfo }>(`/api/reports/${id}`)).report;
-      pubs = await get<Publication[]>(`/api/reports/${id}/publications`);
-      publicUrl = (await get<{ public_url: string }>("/api/meta")).public_url || location.origin;
+      const [r, ps, meta] = await Promise.all([
+        get<{ report: ReportInfo }>(`/api/reports/${id}`),
+        get<Publication[]>(`/api/reports/${id}/publications`),
+        get<{ public_url: string }>("/api/meta"),
+      ]);
+      report = r.report;
+      pubs = ps;
+      publicUrl = meta.public_url || location.origin;
     } catch (e) {
       error = (e as Error).message;
     }
@@ -40,8 +50,8 @@
   );
   const link = $derived(active ? `${publicUrl.replace(/\/$/, "")}${active.path}` : "");
 
-  async function run(setErr: (m: string) => void, action: () => Promise<unknown>) {
-    busy = true;
+  async function run(kind: Action, setErr: (m: string) => void, action: () => Promise<unknown>) {
+    busy = kind;
     setErr("");
     try {
       await action();
@@ -49,12 +59,12 @@
     } catch (e) {
       setErr((e as Error).message);
     } finally {
-      busy = false;
+      busy = null;
     }
   }
-  const linkRun = (action: () => Promise<unknown>) => run((m) => (linkError = m), action);
-  const manageRun = (action: () => Promise<unknown>) => run((m) => (manageError = m), action);
-  const dangerRun = (action: () => Promise<unknown>) => run((m) => (dangerError = m), action);
+  const linkRun = (kind: Action, action: () => Promise<unknown>) => run(kind, (m) => (linkError = m), action);
+  const manageRun = (kind: Action, action: () => Promise<unknown>) => run(kind, (m) => (manageError = m), action);
+  const dangerRun = (kind: Action, action: () => Promise<unknown>) => run(kind, (m) => (dangerError = m), action);
 
   async function publish() {
     if (
@@ -66,7 +76,7 @@
       }))
     )
       return;
-    linkRun(() => post(`/api/reports/${id}/publications`));
+    linkRun("publish", () => post(`/api/reports/${id}/publications`));
   }
 
   async function revoke() {
@@ -77,7 +87,7 @@
       confirmLabel: "停用",
       danger: true,
     });
-    if (ok) dangerRun(() => post(`/api/publications/${active!.id}/revoke`));
+    if (ok) dangerRun("revoke", () => post(`/api/publications/${active!.id}/revoke`));
   }
 
   // ----- report management -----
@@ -97,9 +107,9 @@
       }))
     )
       return;
-    manageRun(() => post(`/api/reports/${id}/archive`));
+    manageRun("archive", () => post(`/api/reports/${id}/archive`));
   }
-  const unarchive = () => manageRun(() => post(`/api/reports/${id}/unarchive`));
+  const unarchive = () => manageRun("unarchive", () => post(`/api/reports/${id}/unarchive`));
   async function remove() {
     if (!report) return;
     const warn = active ? `分享链接会立刻失效（已打开 ${active.views} 次）。` : "";
@@ -111,19 +121,37 @@
       requireText: report.title,
     });
     if (ok)
-      dangerRun(async () => {
+      dangerRun("delete", async () => {
         await del(`/api/reports/${id}`);
         navigate("/app");
       });
   }
 </script>
 
-<TopBar {report} active="publish" />
-{#if error}<div class="banner attention">{error}</div>{/if}
+<TopBar {report} loading={!report && !error} active="publish" />
+{#if error && report}<div class="banner attention">{error}</div>{/if}
 
 <div class="page">
   <PageHeader title="发布" description="把报告的某个版本发布成只读分享页，读者打开链接即可阅读，不用登录。" />
-  {#if report}
+  {#if error && !report}
+    <LoadError message={error} onretry={load} />
+  {:else if !report}
+    <div class="skeleton" role="status" aria-label="正在加载发布状态">
+      <section class="panel stack" aria-hidden="true">
+        <div class="panel-head">
+          <div class="grow">
+            <span class="sk w40 status-title"></span>
+            <div class="small"><Skeleton lines={1} /></div>
+          </div>
+        </div>
+        <span class="sk w80 small"></span>
+      </section>
+      <h2>报告管理</h2>
+      <section class="panel settings" aria-hidden="true">
+        <div class="setting"><div><span class="sk w25"></span><span class="sk w60 small"></span></div></div>
+      </section>
+    </div>
+  {:else}
     {#if report.archived_at}
       <div class="banner">已归档，只读。可在下方「报告管理」中恢复。</div>
     {/if}
@@ -152,7 +180,7 @@
           </div>
         </div>
         {#if !active || stale}
-          <button class="primary" disabled={busy} onclick={publish}>
+          <button class="primary" disabled={!!busy} aria-busy={busy === "publish"} onclick={publish}>
             {active ? `更新为 v${report.current_seq}` : `发布 v${report.current_seq}`}
           </button>
         {/if}
@@ -213,9 +241,9 @@
           </span>
         </div>
         {#if report.archived_at}
-          <button disabled={busy} onclick={unarchive}>恢复</button>
+          <button disabled={!!busy} aria-busy={busy === "unarchive"} onclick={unarchive}>恢复</button>
         {:else}
-          <button disabled={busy} onclick={archive}>归档</button>
+          <button disabled={!!busy} aria-busy={busy === "archive"} onclick={archive}>归档</button>
         {/if}
       </div>
       {#if manageError}<p class="error small setting-error">{manageError}</p>{/if}
@@ -229,7 +257,7 @@
             <b>停用分享链接</b>
             <span class="muted small">链接永久失效（已打开 {active.views} 次），之后再发布会生成新链接。</span>
           </div>
-          <button class="danger" disabled={busy} onclick={revoke}>停用链接</button>
+          <button class="danger" disabled={!!busy} aria-busy={busy === "revoke"} onclick={revoke}>停用链接</button>
         </div>
       {/if}
       <div class="setting">
@@ -239,7 +267,7 @@
             删除所有版本、评论、轮次和分享记录。{report.archived_at ? "" : "需要先归档。"}
           </span>
         </div>
-        <button class="danger" disabled={busy || !report.archived_at} onclick={remove}>永久删除</button>
+        <button class="danger" disabled={!!busy || !report.archived_at} aria-busy={busy === "delete"} onclick={remove}>永久删除</button>
       </div>
       {#if dangerError}<p class="error small setting-error">{dangerError}</p>{/if}
     </section>

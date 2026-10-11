@@ -69,10 +69,10 @@
       {targetLabel}{#if quote}：<q>{truncate(quote, 60)}</q>{/if}
     </div>
   {/if}
-  <textarea bind:this={textarea} bind:value={body} onkeydown={keydown} {placeholder} rows="2"></textarea>
+  <textarea bind:this={textarea} bind:value={body} readonly={busy} onkeydown={keydown} {placeholder} rows="2"></textarea>
   {#if error}<p class="error small">{error}</p>{/if}
   <div class="actions">
     <button class="ghost sm" onclick={oncancel}>取消</button>
-    <button class="primary sm" disabled={(!allowEmpty && !body.trim()) || busy} onclick={save}>{saveLabel}</button>
+    <button class="primary sm" disabled={(!allowEmpty && !body.trim()) || busy} aria-busy={busy} onclick={save}>{saveLabel}</button>
   </div>
 </div>

@@ -7,6 +7,7 @@
   import ChangeView from "./ChangeView.svelte";
   import Composer from "./Composer.svelte";
   import Thread from "./Thread.svelte";
+  import Skeleton from "./Skeleton.svelte";
 
   let {
     comment,
@@ -15,6 +16,7 @@
     block = null,
     review = null,
     ctx = null,
+    reviewLoading = false,
     reportId = "",
     inline = false,
     pickable = false,
@@ -31,6 +33,7 @@
     /** What the round under verification changed for this comment. */
     review?: ReviewItem | null;
     ctx?: DiffCtx | null;
+    reviewLoading?: boolean;
     reportId?: string;
     inline?: boolean;
     pickable?: boolean;
@@ -42,7 +45,7 @@
 
   let editing = $state(false);
   let replying = $state<"" | "message" | "reopen">("");
-  let busy = $state(false);
+  let busy = $state<"" | "resolve" | "delete">("");
   let error = $state("");
 
   const quote = $derived(
@@ -56,8 +59,8 @@
     comment.original_quote && quote && comment.original_quote !== quote ? comment.original_quote : null,
   );
 
-  async function run(fn: () => Promise<unknown>) {
-    busy = true;
+  async function run(kind: "resolve" | "delete", fn: () => Promise<unknown>) {
+    busy = kind;
     error = "";
     try {
       await fn();
@@ -65,14 +68,14 @@
     } catch (e) {
       error = (e as Error).message;
     } finally {
-      busy = false;
+      busy = "";
     }
   }
 
-  const resolve = () => run(() => post(`/api/comments/${comment.id}/resolve`));
+  const resolve = () => run("resolve", () => post(`/api/comments/${comment.id}/resolve`));
   async function remove() {
     if (await ask({ title: "删除这条草稿评论？", message: "删除后无法恢复。", confirmLabel: "删除", danger: true }))
-      run(() => api("DELETE", `/api/comments/${comment.id}`));
+      run("delete", () => api("DELETE", `/api/comments/${comment.id}`));
   }
   // Errors surface inside the composer, next to the text being sent.
   async function sendReply(body: string) {
@@ -144,7 +147,9 @@
 
   <Thread messages={comment.messages} />
 
-  {#if review && comment.status === "verify"}
+  {#if !review && reviewLoading && comment.status === "verify"}
+    <div class="card-change skeleton" role="status" aria-label="正在加载改动"><Skeleton lines={2} /></div>
+  {:else if review && comment.status === "verify"}
     <div class="card-change">
       {#if review.change}
         <ChangeView change={review.change} {ctx} showOp={false} />
@@ -170,17 +175,17 @@
         <!-- the open composer below carries the actions -->
       {:else if comment.status === "draft"}
         <button class="ghost sm" onclick={() => (editing = true)}>编辑</button>
-        <button class="ghost sm" onclick={remove}>删除</button>
+        <button class="ghost sm" disabled={!!busy} aria-busy={busy === "delete"} onclick={remove}>删除</button>
       {:else if comment.status === "open"}
         <button class="ghost sm" onclick={() => toggle("message")}>补充说明</button>
       {:else if comment.status === "clarify"}
-        <button class="ghost sm" disabled={busy} onclick={resolve}>解决</button>
+        <button class="ghost sm" disabled={!!busy} aria-busy={busy === "resolve"} onclick={resolve}>解决</button>
         <button class="primary sm" onclick={() => toggle("message")}>回复</button>
       {:else if comment.status === "resolved"}
-        <button class="ghost sm" disabled={busy} onclick={() => toggle("reopen")}>重新打开</button>
+        <button class="ghost sm" disabled={!!busy} onclick={() => toggle("reopen")}>重新打开</button>
       {:else}
-        <button class="ghost sm" disabled={busy} onclick={() => toggle("reopen")}>重新打开</button>
-        <button class="primary sm" disabled={busy} onclick={resolve}>解决</button>
+        <button class="ghost sm" disabled={!!busy} onclick={() => toggle("reopen")}>重新打开</button>
+        <button class="primary sm" disabled={!!busy} aria-busy={busy === "resolve"} onclick={resolve}>解决</button>
       {/if}
     </div>
     {#if error}<p class="error small">{error}</p>{/if}
