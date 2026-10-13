@@ -17,6 +17,7 @@ struct ShareTpl<'a> {
     updated: String,
     url: String,
     toc: &'a [(String, String, u8)],
+    css_v: &'static str,
 }
 
 #[derive(Template)]
@@ -24,6 +25,7 @@ struct ShareTpl<'a> {
 struct StatusTpl<'a> {
     heading: &'a str,
     message: &'a str,
+    css_v: &'static str,
 }
 
 fn with_headers(status: StatusCode, body: String) -> Response {
@@ -45,7 +47,7 @@ fn with_headers(status: StatusCode, body: String) -> Response {
 }
 
 fn status_page(status: StatusCode, heading: &str, message: &str) -> Response {
-    let body = StatusTpl { heading, message }.render().unwrap_or_else(|_| heading.to_string());
+    let body = StatusTpl { heading, message, css_v: crate::css_version() }.render().unwrap_or_else(|_| heading.to_string());
     with_headers(status, body)
 }
 
@@ -78,6 +80,7 @@ pub async fn page(State(s): State<Shared>, Path(token): Path<String>) -> Respons
                 updated: day_string(p.updated_at),
                 url: format!("{}/s/{token}", s.config.public_url.trim_end_matches('/')),
                 toc: &p.toc,
+                css_v: crate::css_version(),
             };
             match tpl.render() {
                 Ok(body) => with_headers(StatusCode::OK, body),

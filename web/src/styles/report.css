@@ -8,6 +8,7 @@
   --accent: #c0392b;
   --accent-soft: rgba(192, 57, 43, 0.12);
   --code-bg: #f6f6f4;
+  --edge-shadow: rgba(0, 0, 0, 0.16);
   --font-body: -apple-system, BlinkMacSystemFont, "PingFang SC", "Source Han Sans SC", "Noto Sans CJK SC",
     "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
@@ -77,19 +78,41 @@
   border-collapse: collapse;
   margin: 0 0 1.2em;
   font-size: 0.94em;
+  line-height: 1.6;
   display: block;
   overflow-x: auto;
   max-width: 100%;
   /* As a block box the table would span the full column, so its comment highlight would too. */
   width: fit-content;
 }
+/* Three-line table: strong rules above, below the header and at the bottom; light lines between rows. */
 .report th, .report td {
-  border: 1px solid var(--line);
-  padding: 0.35em 0.75em;
+  /* CJK text can break after any character, so without a floor a short label column next to a
+     long one gets squeezed to a character or two per line. */
+  min-width: 4em;
+  padding: 0.5em 0.75em;
+  border-bottom: 1px solid var(--line);
   text-align: left;
   vertical-align: top;
 }
-.report th { background: #fafafa; font-weight: 600; }
+.report th { font-weight: 600; border-top: 1px solid var(--line-strong); border-bottom-color: var(--line-strong); }
+.report tbody tr:last-child td { border-bottom-color: var(--line-strong); }
+/* An empty top-left cell marks a comparison table: the first column holds row labels. */
+.report table:has(> thead th:first-child:empty) td:first-child { color: var(--fg-muted); word-break: keep-all; }
+
+/*
+ * Edge shadows show which way a wide table can scroll. Inset shadows stay put while the content
+ * scrolls, and only set box-shadow, so the workbench's background-color comment marks still show.
+ * A table that does not overflow has an inactive timeline, so it gets no shadow.
+ */
+@supports (animation-timeline: scroll()) {
+  .report table { animation: table-edges linear both; animation-timeline: scroll(self inline); }
+}
+@keyframes table-edges {
+  from { box-shadow: inset 10px 0 8px -8px transparent, inset -10px 0 8px -8px var(--edge-shadow); }
+  4%, 96% { box-shadow: inset 10px 0 8px -8px var(--edge-shadow), inset -10px 0 8px -8px var(--edge-shadow); }
+  to { box-shadow: inset 10px 0 8px -8px var(--edge-shadow), inset -10px 0 8px -8px transparent; }
+}
 
 .report img { max-width: 100%; height: auto; display: block; margin: 0.5em auto; }
 .report figure.diagram { margin: 0 0 1.2em; overflow-x: auto; }

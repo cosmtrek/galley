@@ -1,40 +1,97 @@
 html, body { margin: 0; background: #fff; }
 body { color: #222; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Source Han Sans SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; }
+@media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
 
+/*
+ * Three columns center the text in the viewport. The outer columns split the leftover space
+ * evenly, but the left one never shrinks below the TOC, so on mid widths the text moves right
+ * instead of sliding under it. 17px matches .report, so 70ch here equals the article's 70ch.
+ * This page cannot read app.css variables (TOC is its 3xs 256px); report.css ones are fine.
+ */
 .share {
   display: grid;
-  /* Tailwind container scale like app.css (3xs 256 TOC, 6xl 1152 page); this page cannot read app.css variables. */
-  grid-template-columns: 256px minmax(0, 1fr);
-  gap: 3rem;
-  max-width: 1152px;
-  margin: 0 auto;
-  padding: 3rem 1.5rem 6rem;
+  grid-template-columns: minmax(max-content, 1fr) minmax(0, calc(70ch + 3rem)) minmax(0, 1fr);
+  font-size: 17px;
 }
-.share main { min-width: 0; }
-.share-head { margin-bottom: 2rem; max-width: 70ch; }
-.share-meta { color: #6b6b6b; font-size: 0.9rem; margin: 0; }
+.share main { grid-column: 2; min-width: 0; padding: 3rem 1.5rem 6rem; }
+.share-head { margin-bottom: 2rem; }
+.share-meta { color: var(--fg-muted); font-size: 0.9rem; margin: 0; }
+.report :is(h1, h2, h3, h4)[id] { scroll-margin-top: 1.5rem; }
 
-.toc { position: sticky; top: 2rem; align-self: start; max-height: calc(100vh - 4rem); overflow-y: auto; font-size: 0.9rem; line-height: 1.5; }
-.toc-title { font-weight: 600; margin-bottom: 0.5rem; }
-.toc-inline { display: none; }
-.toc summary { font-weight: 600; cursor: pointer; list-style: none; }
-.toc summary::-webkit-details-marker { display: none; }
-.toc summary::after { content: " ▸"; color: #6b6b6b; }
-.toc details[open] summary { margin-bottom: 0.5rem; }
-.toc details[open] summary::after { content: " ▾"; }
-.toc ul { list-style: none; margin: 0; padding: 0; border-left: 1px solid #e2e2e2; }
+.glyph { flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+
+.toc-side {
+  grid-column: 1;
+  justify-self: start;
+  align-self: start;
+  position: sticky;
+  top: 0;
+  box-sizing: border-box;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+/*
+ * The toggle icon sits 12px from the top left in both states, so expanding and collapsing are the
+ * same click. The header strip stays full width to cover the list scrolling under it, but only the
+ * icon takes clicks.
+ */
+.toc-side summary {
+  display: flex;
+  padding: 12px;
+  list-style: none;
+  pointer-events: none;
+}
+.toc-side summary::-webkit-details-marker { display: none; }
+.toc-side summary:focus-visible { outline: none; }
+.toc-side summary:focus-visible .glyph { outline: 2px solid var(--line-strong); }
+.toc-side summary .glyph { box-sizing: content-box; padding: 8px; color: var(--fg-muted); cursor: pointer; pointer-events: auto; }
+.toc-side summary .glyph:hover { background: #f0efec; color: var(--fg); }
+/* Icon only; the label stays for screen readers. */
+.toc-side summary span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+.toc-side[open] {
+  width: 256px;
+  height: 100vh;
+  margin-right: 1.5rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: #fafaf9;
+  border-right: 1px solid var(--line);
+}
+.toc-side[open] summary { position: sticky; top: 0; background: #fafaf9; }
+.toc-side[open] .toc { padding: 0 1.25rem 2rem; }
+
+/* Collapsed: only the icon stays pinned at the top left. */
+.toc-side:not([open]) summary .glyph { transform: scaleX(-1); }
+
+.toc ul { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--line); scroll-target-group: auto; }
 .toc li { margin: 0; }
-.toc a { display: block; color: #444; text-decoration: none; padding: 0.2rem 0 0.2rem 0.8rem; }
-.toc a:hover { color: #c0392b; }
-.toc .toc-l3 a { padding-left: 1.6rem; color: #6b6b6b; }
+.toc a { display: block; color: #444; text-decoration: none; padding: 0.2rem 0 0.2rem 0.8rem; margin-left: -1px; border-left: 2px solid transparent; }
+.toc a:hover { color: var(--fg); background: #f3f2ef; }
+.toc .toc-l3 a { padding-left: 1.6rem; color: var(--fg-muted); }
+/* Scroll spy where supported; kept separate so other browsers drop only this rule. */
+.toc a:target-current { color: var(--fg); font-weight: 600; border-left-color: var(--fg); }
+
+.toc-inline { display: none; }
+.toc-inline summary { font-weight: 600; cursor: pointer; list-style: none; }
+.toc-inline summary::-webkit-details-marker { display: none; }
+.toc-inline summary::after { content: " ▸"; color: var(--fg-muted); }
+.toc-inline details[open] summary { margin-bottom: 0.5rem; }
+.toc-inline details[open] summary::after { content: " ▾"; }
 
 .status-page { max-width: 32rem; margin: 20vh auto; padding: 0 1.5rem; text-align: center; }
 .status-page h1 { font-size: 1.4rem; }
 .status-page p { color: #6b6b6b; }
 
 @media (max-width: 860px) {
-  .share { display: block; padding: 1.25rem 1rem 4rem; }
+  .share { display: block; }
+  .share main { padding: 1.25rem 1rem 4rem; }
   .toc-side { display: none; }
   .share-head { margin-bottom: 1.25rem; }
-  .toc-inline { display: block; position: static; max-height: none; margin-bottom: 1.5rem; border-block: 1px solid #e2e2e2; padding: 0.75rem 0; }
+  .toc-inline { display: block; margin-bottom: 1.5rem; border-block: 1px solid var(--line); padding: 0.75rem 0; font-size: 0.9rem; line-height: 1.5; }
+}
+
+@media print {
+  .toc-side, .toc-inline { display: none; }
+  .share { display: block; }
 }

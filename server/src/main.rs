@@ -40,6 +40,18 @@ const FAVICON_SVG: &[u8] = include_bytes!("../static/favicon.svg");
 const FAVICON_ICO: &[u8] = include_bytes!("../static/favicon.ico");
 const APPLE_TOUCH_ICON: &[u8] = include_bytes!("../static/apple-touch-icon.png");
 
+/// Appended to the stylesheet URLs so a new build is not hidden behind the browser's cached CSS.
+pub fn css_version() -> &'static str {
+    use sha2::{Digest, Sha256};
+    static V: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        let mut h = Sha256::new();
+        h.update(REPORT_CSS);
+        h.update(SHARE_CSS);
+        hex::encode(h.finalize())[..12].to_string()
+    });
+    &V
+}
+
 pub fn app(state: Shared) -> Router {
     Router::new()
         .merge(api::router())

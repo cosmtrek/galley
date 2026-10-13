@@ -13,20 +13,23 @@
 <meta name="twitter:card" content="summary">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
-<link rel="stylesheet" href="/static/report.css">
-<link rel="stylesheet" href="/static/share.css">
+<link rel="stylesheet" href="/static/report.css?v={{ css_v }}">
+<link rel="stylesheet" href="/static/share.css?v={{ css_v }}">
 </head>
 <body>
 <div class="share">
   {% if !toc.is_empty() %}
-  <nav class="toc toc-side" aria-label="目录">
-    <div class="toc-title">目录</div>
-    <ul>
-      {% for (id, text, level) in toc %}
-      <li class="toc-l{{ level }}"><a href="#{{ id }}">{{ text }}</a></li>
-      {% endfor %}
-    </ul>
-  </nav>
+  {# A <details> is the only open/close control available without scripts; the state resets on reload. #}
+  <details class="toc-side" open>
+    <summary><svg class="glyph" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M12 4l-4 4 4 4M7 4l-4 4 4 4"/></svg><span>目录</span></summary>
+    <nav class="toc" aria-label="目录">
+      <ul>
+        {% for (id, text, level) in toc %}
+        <li class="toc-l{{ level }}"><a href="#{{ id }}">{{ text }}</a></li>
+        {% endfor %}
+      </ul>
+    </nav>
+  </details>
   {% endif %}
   <main>
     <header class="share-head">
