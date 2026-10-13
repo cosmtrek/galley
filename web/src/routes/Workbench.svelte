@@ -7,6 +7,7 @@
   import { anchorToRange, scopeFor, selectionToAnchor } from "../lib/anchor";
   import { commentPosition, fmtAgo, STATUS_LABEL, truncate } from "../lib/format";
   import { diffCtx, partner, withoutPartners, type DiffCtx } from "../lib/diffctx";
+  import { openViewer, zoomable } from "../lib/viewer";
   import type { Anchor, Comment, CommentStatus, ExtraChange, ReportInfo, Review, ReviewItem, Round, Version } from "../lib/types";
   import ChangeView from "../components/ChangeView.svelte";
   import PromptBox from "../components/PromptBox.svelte";
@@ -568,9 +569,14 @@
   // ----- clicking highlighted text opens its comment in place -----
 
   function onArticleClick(e: MouseEvent) {
-    if (!commenting) return;
     const sel = getSelection();
     if (sel && !sel.isCollapsed) return;
+    // Images carry no text to anchor on, so zooming wins over showing a block comment.
+    if (zoomable(e.target)) {
+      openViewer(e.target);
+      return;
+    }
+    if (!commenting) return;
     const doc = document as Document & {
       caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
       caretRangeFromPoint?: (x: number, y: number) => Range | null;
@@ -703,7 +709,7 @@
       <div class="report"><h1 class="report-title" bind:this={titleEl}>{version.doc.title}</h1></div>
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-      <article class="report" bind:this={articleEl} onmouseup={onArticleMouseUp} onclick={onArticleClick}>
+      <article class="report zoomable" bind:this={articleEl} onmouseup={onArticleMouseUp} onclick={onArticleClick}>
         {@html version.html}
       </article>
       {#if commenting && gutter && !touch.current}

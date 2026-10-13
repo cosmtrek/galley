@@ -52,6 +52,19 @@ pub fn css_version() -> &'static str {
     &V
 }
 
+/// The share page's image viewer, built by `pnpm build` into web/dist alongside the workbench.
+fn share_js() -> Option<std::borrow::Cow<'static, [u8]>> {
+    WebDist::get("share.js").map(|f| f.data)
+}
+
+/// Appended to the share script URL, like `css_version` for the stylesheets.
+pub fn share_js_version() -> &'static str {
+    use sha2::{Digest, Sha256};
+    static V: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| hex::encode(Sha256::digest(share_js().unwrap_or_default()))[..12].to_string());
+    &V
+}
+
 pub fn app(state: Shared) -> Router {
     Router::new()
         .merge(api::router())
@@ -61,6 +74,7 @@ pub fn app(state: Shared) -> Router {
         .route("/a/{report}/{*rest}", get(asset))
         .route("/static/report.css", get(|| async { css(REPORT_CSS) }))
         .route("/static/share.css", get(|| async { css(SHARE_CSS) }))
+        .route("/static/share.js", get(share_script))
         .route("/favicon.svg", get(|| async { icon("image/svg+xml", FAVICON_SVG) }))
         .route("/favicon.ico", get(|| async { icon("image/x-icon", FAVICON_ICO) }))
         .route("/apple-touch-icon.png", get(|| async { icon("image/png", APPLE_TOUCH_ICON) }))
@@ -75,6 +89,17 @@ pub fn app(state: Shared) -> Router {
 fn css(body: &'static str) -> Response {
     ([(header::CONTENT_TYPE, "text/css; charset=utf-8"), (header::CACHE_CONTROL, "public, max-age=300")], body)
         .into_response()
+}
+
+async fn share_script() -> Response {
+    match share_js() {
+        Some(body) => (
+            [(header::CONTENT_TYPE, "text/javascript; charset=utf-8"), (header::CACHE_CONTROL, "public, max-age=300")],
+            body.into_owned(),
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 /// Public on purpose: the share and status pages link these for readers who are not logged in.

@@ -252,11 +252,20 @@ async fn full_round_and_privacy() {
     assert_eq!(st, StatusCode::OK);
     let html = html.as_str().unwrap();
     assert!(html.contains("12.3%"));
-    for leaked in [marker, "已改为", "语气更客观", "<script", c1.as_str(), "data-block", "data-cell"] {
+    for leaked in [marker, "已改为", "语气更客观", c1.as_str(), "data-block", "data-cell"] {
         assert!(!html.contains(leaked), "share page leaked {leaked}");
     }
     assert!(headers.contains("noindex"));
-    assert!(headers.contains("script-src 'none'"));
+    // The image viewer is the only script, admitted by a per-response nonce.
+    let nonce = headers.split("script-src 'nonce-").nth(1).and_then(|s| s.split('\'').next()).expect("no script nonce");
+    assert_eq!(html.matches("<script").count(), 1, "share page may only load its viewer");
+    assert!(html.contains(&format!(r#"<script nonce="{nonce}" src="/static/share.js?v="#)), "{html}");
+    assert!(!headers.contains("unsafe-"), "{headers}");
+    let (_, _, again) = t.req("GET", &path, Who::Anon, None).await;
+    assert!(!again.contains(&format!("'nonce-{nonce}'")), "nonce reused across responses");
+    let (st, _, js) = t.req("GET", "/static/share.js", Who::Anon, None).await;
+    assert_eq!(st, StatusCode::OK, "share.js missing: run `corepack pnpm build` in web/ first");
+    assert!(js.contains("text/javascript"), "{js}");
     assert!(headers.contains("img-src 'self' data: http: https:;"));
     assert!(headers.contains("no-referrer"));
     assert!(html.contains(r#"<link rel="icon" href="/favicon.svg""#), "share page has no favicon");
@@ -266,8 +275,9 @@ async fn full_round_and_privacy() {
     assert_eq!(p2["publication"]["path"].as_str().unwrap(), path);
     let (st, _, _) = t.req("POST", &format!("/api/publications/{pid}/revoke"), Who::Owner, None).await;
     assert_eq!(st, StatusCode::NO_CONTENT);
-    let (st, gone, _) = t.req("GET", &path, Who::Anon, None).await;
+    let (st, gone, gone_headers) = t.req("GET", &path, Who::Anon, None).await;
     assert_eq!(st, StatusCode::GONE);
+    assert!(gone_headers.contains("script-src 'none'"), "{gone_headers}");
     assert!(gone.as_str().unwrap().contains(r#"<link rel="icon" href="/favicon.svg""#), "status page has no favicon");
     let (st, _, _) = t.req("GET", "/s/doesnotexist", Who::Anon, None).await;
     assert_eq!(st, StatusCode::NOT_FOUND);

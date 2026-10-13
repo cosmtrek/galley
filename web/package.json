@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && vite build -c vite.share.config.ts",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run"
   },

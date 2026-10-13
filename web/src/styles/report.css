@@ -9,6 +9,9 @@
   --accent-soft: rgba(192, 57, 43, 0.12);
   --code-bg: #f6f6f4;
   --edge-shadow: rgba(0, 0, 0, 0.16);
+  --viewer-bg: rgba(18, 18, 18, 0.96);
+  --viewer-bar: rgba(0, 0, 0, 0.6);
+  --viewer-hover: rgba(255, 255, 255, 0.16);
   --font-body: -apple-system, BlinkMacSystemFont, "PingFang SC", "Source Han Sans SC", "Noto Sans CJK SC",
     "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
@@ -118,6 +121,73 @@
 .report figure.diagram { margin: 0 0 1.2em; overflow-x: auto; }
 .report figure.diagram img { margin: 0 auto; }
 .report hr { border: none; border-top: 1px solid var(--line); margin: 2em 0; }
+
+/*
+ * Image viewer (web/src/lib/viewer.ts). It also runs on the share page, which has no app.css, so
+ * its controls are styled here rather than with the workbench's button classes.
+ */
+.report.zoomable img:not(a img) { cursor: zoom-in; }
+dialog.zoom {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  overscroll-behavior: contain;
+  background: var(--viewer-bg);
+  color: #fff;
+  user-select: none;
+  -webkit-user-select: none;
+}
+dialog.zoom::backdrop { background: transparent; }
+dialog.zoom:focus { outline: none; }
+.zoom-stage { position: absolute; inset: 0; touch-action: none; }
+/* Diagrams and transparent images are drawn for a white page. */
+.zoom-img { position: absolute; left: 0; top: 0; max-width: none; margin: 0; background: var(--bg); -webkit-user-drag: none; }
+.zoom-stage.pannable .zoom-img { cursor: grab; }
+.zoom-stage.dragging .zoom-img { cursor: grabbing; }
+.zoom-bar {
+  position: absolute;
+  left: 50%;
+  bottom: max(16px, env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border-radius: 8px;
+  background: var(--viewer-bar);
+  font: 13px/1 var(--font-body);
+}
+.zoom-bar .zoom-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: auto;
+  min-width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  opacity: 1;
+  cursor: pointer;
+}
+.zoom-bar .zoom-btn:hover:not(:disabled) { background: var(--viewer-hover); }
+.zoom-bar .zoom-btn:focus-visible { outline: 2px solid #fff; outline-offset: -2px; }
+.zoom-bar .zoom-btn:disabled { opacity: 0.4; cursor: default; }
+.zoom-bar .zoom-pct { min-width: 56px; font-variant-numeric: tabular-nums; }
+.zoom-bar svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+@media (hover: none) {
+  .zoom-bar .zoom-btn { min-width: 40px; height: 40px; }
+}
 
 @media (max-width: 640px) {
   .report { font-size: 16px; }
