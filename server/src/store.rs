@@ -11,7 +11,7 @@ use crate::align::{align, assign_fresh};
 use crate::anchor::{Anchor, AnchorState, relocate};
 use crate::db::{now_ms, random_token, short_id};
 use crate::diff::{BlockChange, BlockDiff, ChangeOp, compare, replacements};
-use crate::doc::{BlockKind, Doc, parse};
+use crate::doc::{BlockId, BlockKind, Doc, parse};
 use crate::domain::{
     CommentAction, CommentStatus, Role, RoundAction, RoundStatus, comment_transition, round_transition,
 };
@@ -854,6 +854,9 @@ impl Store {
             transition_comment(&tx, &r.comment_id, action, role)?;
             insert_message(&tx, &r.comment_id, Role::Agent, Some(&r.action), r.body.trim(), Some(round_id))?;
         }
+        if let Some(result) = &result_doc {
+            follow_rewrites(&tx, round_id, &base, result, &result_vid, &mut relocs)?;
+        }
         for (cid, state) in &relocs {
             if *state == AnchorState::Orphaned {
                 transition_comment(&tx, cid, CommentAction::Orphan, Role::Agent)?;
@@ -1007,9 +1010,14 @@ impl Store {
             let spans = |a: &Anchor| matches!(a, Anchor::Text { end_block_id: Some(_), .. });
             let mut change = None;
             let mut section_changes = Vec::new();
-            let heading = section_heading(&c.anchor, &base.doc).or_else(|| base_anchor.as_ref().and_then(|a| section_heading(a, &base.doc)));
-            if let Some(h) = heading {
-                let span: HashSet<String> = base.doc.section_span(h).into_iter().chain(target.doc.section_span(h)).collect();
+            // A section comment that followed a rewritten heading has a different heading in each version.
+            let headings: Vec<&str> = section_heading(&c.anchor, &target.doc)
+                .into_iter()
+                .chain(base_anchor.as_ref().and_then(|a| section_heading(a, &base.doc)))
+                .collect();
+            if !headings.is_empty() {
+                let span: HashSet<String> =
+                    headings.iter().flat_map(|h| base.doc.section_span(h).into_iter().chain(target.doc.section_span(h))).collect();
                 section_changes = diff.changes.iter().filter(|ch| span.contains(&ch.block_id)).cloned().collect();
             } else {
                 let mut ids: HashSet<String> = c.anchor.block_ids(&target.doc).into_iter().collect();
@@ -1696,12 +1704,25 @@ fn packet_comment(c: &Comment, doc: &Doc) -> PacketComment {
     }
 }
 
-/// Changed blocks that no comment of this round covers. A section comment, or any comment anchored on a
-/// heading, covers the whole section in both versions so the agent's rewrite of it isn't flagged as extra.
-/// A rewrite too different to keep its block id comes out as "deleted + added"; the added blocks are covered
-/// only when every block deleted in that run was commented on, so new material next to a commented
-/// paragraph (e.g. a "remove this" comment beside a freshly written section) is still flagged.
+/// Changed blocks that no comment of this round covers. A rewrite too different to keep its block id comes out as
+/// "deleted + added"; its added blocks count as covered only when the round asked for the whole rewrite (see
+/// `requested_rewrites`), so new material next to a commented paragraph is still flagged.
 fn extra_changes(tx: &Transaction, round_id: &str, base: &Doc, result: &Doc, diff: &BlockDiff) -> AppResult<Vec<ExtraChange>> {
+    let mut covered = commented_blocks(tx, round_id, base, result)?;
+    for (_, adds) in requested_rewrites(&covered, base, result) {
+        covered.extend(adds);
+    }
+    Ok(diff
+        .changes
+        .iter()
+        .filter(|c| !covered.contains(&c.block_id))
+        .map(|c| ExtraChange { change: c.clone(), confirmed: false, revert_comment_id: None })
+        .collect())
+}
+
+/// Blocks the comments of a round are about. A section comment, or any comment anchored on a heading, covers the
+/// whole section in both versions so the agent's rewrite of it isn't flagged as extra.
+fn commented_blocks(tx: &Transaction, round_id: &str, base: &Doc, result: &Doc) -> AppResult<HashSet<String>> {
     let ids: Vec<String> = tx
         .prepare("SELECT id FROM comments WHERE round_id = ?1")?
         .query_map([round_id], |r| r.get(0))?
@@ -1721,17 +1742,74 @@ fn extra_changes(tx: &Transaction, round_id: &str, base: &Doc, result: &Doc, dif
             covered.extend(anchor.block_ids(base));
         }
     }
-    for (dels, adds) in replacements(base, result) {
-        if dels.iter().all(|d| covered.contains(d)) {
-            covered.extend(adds);
-        }
+    Ok(covered)
+}
+
+/// Replacement runs the round asked for: every block deleted in the run was commented on. A run where only some
+/// of the deleted blocks were commented on (e.g. "remove this" beside a freshly written section) doesn't count.
+fn requested_rewrites(commented: &HashSet<String>, base: &Doc, result: &Doc) -> Vec<(Vec<BlockId>, Vec<BlockId>)> {
+    replacements(base, result).into_iter().filter(|(dels, _)| dels.iter().all(|d| commented.contains(d))).collect()
+}
+
+/// A comment whose block the agent rewrote as asked would otherwise lose its anchor, since the rewrite is too
+/// different to keep the block id. It follows the rewrite instead: onto the block that replaced it, or the
+/// replacing heading for a section comment. Updates `relocs` so the comment isn't marked orphaned.
+fn follow_rewrites(
+    tx: &Transaction,
+    round_id: &str,
+    base: &Version,
+    result: &Doc,
+    result_vid: &str,
+    relocs: &mut [(String, AnchorState)],
+) -> AppResult<()> {
+    let rewrites = requested_rewrites(&commented_blocks(tx, round_id, &base.doc, result)?, &base.doc, result);
+    if rewrites.is_empty() {
+        return Ok(());
     }
-    Ok(diff
-        .changes
-        .iter()
-        .filter(|c| !covered.contains(&c.block_id))
-        .map(|c| ExtraChange { change: c.clone(), confirmed: false, revert_comment_id: None })
-        .collect())
+    for (cid, state) in relocs.iter_mut().filter(|(_, s)| *s == AnchorState::Orphaned) {
+        let (_, comment_round) = comment_report_round(tx, cid)?;
+        if comment_round.as_deref() != Some(round_id) {
+            continue;
+        }
+        let Some(anchor) = anchor_at(tx, cid, &base.id)? else { continue };
+        let ids: Vec<String> = match &anchor {
+            Anchor::Document => continue,
+            Anchor::Section { section_id } => vec![section_id.clone()],
+            a => a.block_ids(&base.doc),
+        };
+        let Some((dels, adds)) = rewrites.iter().find(|(dels, _)| dels.iter().any(|d| ids.contains(d))) else { continue };
+        // A run that grew well beyond what it replaced is a restructuring (e.g. a section comment that led to a
+        // rewritten chapter); there is no telling which new block a comment inside it belongs to.
+        if adds.len() > dels.len() + 2 {
+            continue;
+        }
+        // Blocks rewritten one for one keep their order, so each comment lands on its own new block, and a single
+        // block split into several leads to the first. Otherwise, e.g. one paragraph rewritten and its commented
+        // neighbour deleted as asked, there is no telling which comment the new text answers.
+        let at = if dels.len() == adds.len() {
+            dels.iter().position(|d| ids.contains(d)).unwrap_or(0)
+        } else if dels.len() == 1 {
+            0
+        } else {
+            continue;
+        };
+        let moved = match &anchor {
+            Anchor::Section { .. } => {
+                let heading = adds.iter().find(|a| result.block(a).is_some_and(|b| b.kind == BlockKind::Heading));
+                match heading {
+                    Some(h) => Anchor::Section { section_id: h.clone() },
+                    None => continue,
+                }
+            }
+            _ => Anchor::Block { block_id: adds[at].clone() },
+        };
+        tx.execute(
+            "UPDATE comment_anchors SET anchor = ?3, state = ?4 WHERE comment_id = ?1 AND version_id = ?2",
+            params![cid.as_str(), result_vid, serde_json::to_string(&moved)?, AnchorState::Moved.as_str()],
+        )?;
+        *state = AnchorState::Moved;
+    }
+    Ok(())
 }
 
 /// The heading whose section a comment is about: an explicit section anchor, or any anchor sitting on a heading.

@@ -604,9 +604,153 @@ async fn new_text_beside_a_commented_paragraph_is_still_extra() {
         "Galley 是一个自托管的审阅工作台，在报告上写评论再交给 AI 修改。\n\n它的出发点是替代另一个产品里写报告的流程。",
         "全新的一段，没有人要求写它。",
     );
-    let (extra, _) = rewrite_round(REWRITE_V1, &["自托管"], &after).await;
+    let (extra, review) = rewrite_round(REWRITE_V1, &["自托管"], &after).await;
     assert!(extra.iter().any(|t| t == "全新的一段，没有人要求写它。"), "{extra:?}");
     assert!(extra.iter().any(|t| t.starts_with("它的出发点")), "{extra:?}");
+    // The new paragraph wasn't asked for, so the comment doesn't claim it.
+    assert_eq!(review["items"][0]["comment"]["anchor_state"], "orphaned", "{review}");
+}
+
+/// Comments on `before` with the anchors `anchors` builds from the report, answers every comment with `action`,
+/// submits `after` and returns the round's review.
+async fn anchored_round(before: &str, anchors: impl Fn(&Value) -> Vec<Value>, action: &str, after: &str) -> Value {
+    let t = T::new().await;
+    let (_, r, _) = t.req("POST", "/api/reports", Who::Agent, Some(json!({ "markdown": before }))).await;
+    let rid = r["id"].as_str().unwrap().to_string();
+    let (_, report, _) = t.req("GET", &format!("/api/reports/{rid}"), Who::Owner, None).await;
+    let mut replies = Vec::new();
+    for anchor in anchors(&report) {
+        let (st, c, _) = t.req("POST", &format!("/api/reports/{rid}/comments"), Who::Owner, Some(json!({ "body": "改", "anchor": anchor }))).await;
+        assert_eq!(st, StatusCode::OK, "{c}");
+        replies.push(json!({ "comment_id": c["id"], "action": action, "body": "已处理" }));
+    }
+    let (_, round, _) = t.req("POST", &format!("/api/reports/{rid}/rounds"), Who::Owner, None).await;
+    let round_id = round["id"].as_str().unwrap().to_string();
+    let (st, res, _) = t
+        .req("POST", &format!("/api/rounds/{round_id}/result"), Who::Agent, Some(json!({ "markdown": after, "summary": "x", "replies": replies })))
+        .await;
+    assert_eq!(st, StatusCode::OK, "{res}");
+    let (_, review, _) = t.req("GET", &format!("/api/rounds/{round_id}/review"), Who::Owner, None).await;
+    review
+}
+
+/// The text of the block a review item's comment is anchored on in the result version.
+fn anchored_text<'a>(review: &'a Value, item: usize) -> &'a str {
+    let c = &review["items"][item]["comment"];
+    let id = c["anchor"]["block_id"].as_str().or(c["anchor"]["section_id"].as_str()).unwrap_or_default();
+    review["items"][item]["section_changes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .chain(review["items"][item]["change"].as_object().map(|_| &review["items"][item]["change"]))
+        .find(|ch| ch["block_id"] == id)
+        .and_then(|ch| ch["new_text"].as_str())
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn comments_follow_paragraphs_rewritten_as_asked() {
+    let after = REWRITE_V1
+        .replace("Galley 是一个自托管的审阅工作台，在报告上写评论再交给 AI 修改。", "像批改文稿一样审阅 AI 写的报告，核对无误后再发布。")
+        .replace("它的出发点是替代另一个产品里写报告的流程。", "很难看出每一版到底改了哪里，也不知道有没有顺手动了别处。");
+    let (_, review) = rewrite_round(REWRITE_V1, &["自托管", "出发点"], &after).await;
+    for i in 0..2 {
+        assert_eq!(review["items"][i]["comment"]["anchor_state"], "moved", "{review}");
+    }
+    // Rewritten one for one, so each comment lands on the paragraph that replaced its own.
+    let texts: Vec<&str> = (0..2).map(|i| anchored_text(&review, i)).collect();
+    assert!(texts.iter().any(|t| t.starts_with("像批改文稿")) && texts.iter().any(|t| t.starts_with("很难看出")), "{texts:?}");
+}
+
+#[tokio::test]
+async fn a_comment_follows_a_paragraph_split_into_several() {
+    let after = REWRITE_V1.replace(
+        "它的出发点是替代另一个产品里写报告的流程。",
+        "每次改完很难核对。\n\n- 不知道改了哪里；\n- 不知道有没有动别处。",
+    );
+    let (_, review) = rewrite_round(REWRITE_V1, &["出发点"], &after).await;
+    assert_eq!(review["items"][0]["comment"]["anchor_state"], "moved", "{review}");
+    assert_eq!(anchored_text(&review, 0), "每次改完很难核对。", "{review}");
+}
+
+#[tokio::test]
+async fn a_text_comment_with_a_question_follows_the_rewrite_and_stays_a_question() {
+    let quote = "自托管的审阅工作台";
+    let after = REWRITE_V1.replace("Galley 是一个自托管的审阅工作台，在报告上写评论再交给 AI 修改。", "像批改文稿一样审阅 AI 写的报告，核对无误后再发布。");
+    let review = anchored_round(
+        REWRITE_V1,
+        |report| {
+            let text = "Galley 是一个自托管的审阅工作台，在报告上写评论再交给 AI 修改。";
+            let start = text[..text.find(quote).unwrap()].chars().count();
+            vec![json!({ "type": "text", "block_id": block_id(report, "自托管"), "start": start, "end": start + quote.chars().count(),
+                "quote": quote, "prefix": "", "suffix": "" })]
+        },
+        "clarify",
+        &after,
+    )
+    .await;
+    let c = &review["items"][0]["comment"];
+    assert_eq!(c["anchor_state"], "moved", "{review}");
+    assert_eq!(c["anchor"]["type"], "block", "{review}");
+    assert_eq!(c["status"], "clarify", "a followed comment must not be marked orphaned: {review}");
+}
+
+#[tokio::test]
+async fn a_comment_follows_a_redrawn_diagram() {
+    let before = "---\ntitle: 图\n---\n\n## 架构\n\n第一段说明。\n\n<svg width=\"200\" height=\"100\"><text x=\"20\" y=\"35\">入口</text></svg>\n\n第二段说明。\n";
+    let after = before.replace("<text x=\"20\" y=\"35\">入口</text>", "<rect width=\"120\" height=\"40\"/><text x=\"20\" y=\"35\">入口和网关</text>");
+    let review = anchored_round(
+        before,
+        |report| {
+            let blocks = report["version"]["doc"]["blocks"].as_array().unwrap();
+            let fig = blocks.iter().find(|b| b["kind"] != "heading" && b["kind"] != "paragraph").unwrap();
+            vec![json!({ "type": "block", "block_id": fig["id"] })]
+        },
+        "changed",
+        &after,
+    )
+    .await;
+    let c = &review["items"][0]["comment"];
+    assert_eq!(c["anchor_state"], "moved", "{review}");
+    assert_ne!(review["items"][0]["base_anchor"]["block_id"], c["anchor"]["block_id"], "the diagram got a new block id: {review}");
+}
+
+#[tokio::test]
+async fn a_section_comment_follows_its_rewritten_heading() {
+    let after = REWRITE_V1.replace("## 一、简介", "## 一、为什么要有它");
+    let review = anchored_round(
+        REWRITE_V1,
+        |report| vec![json!({ "type": "section", "section_id": block_id(report, "简介") })],
+        "changed",
+        &after,
+    )
+    .await;
+    let c = &review["items"][0]["comment"];
+    assert_eq!(c["anchor_state"], "moved", "{review}");
+    assert_eq!(c["anchor"]["type"], "section", "{review}");
+    assert_eq!(review["items"][0]["section_title"], "一、为什么要有它", "{review}");
+}
+
+#[tokio::test]
+async fn a_deleted_paragraph_does_not_follow_its_rewritten_neighbour() {
+    // Both paragraphs are commented: the first is rewritten, the second deleted as asked. The diff sees one run of
+    // "2 deleted + 1 added" and can't tell which comment the new paragraph answers, so neither follows it rather
+    // than the deletion request landing on the rewrite.
+    let after = REWRITE_V1
+        .replace("Galley 是一个自托管的审阅工作台，在报告上写评论再交给 AI 修改。", "像批改文稿一样审阅 AI 写的报告，核对无误后再发布。")
+        .replace("它的出发点是替代另一个产品里写报告的流程。\n\n", "");
+    let (_, review) = rewrite_round(REWRITE_V1, &["自托管", "出发点"], &after).await;
+    for i in 0..2 {
+        assert_eq!(review["items"][i]["comment"]["anchor_state"], "orphaned", "{review}");
+    }
+}
+
+#[tokio::test]
+async fn a_comment_on_a_deleted_paragraph_stays_orphaned() {
+    // "Remove this" carried out with nothing written in its place: there is nothing to follow.
+    let after = REWRITE_V1.replace("它的出发点是替代另一个产品里写报告的流程。\n\n", "");
+    let (_, review) = rewrite_round(REWRITE_V1, &["出发点"], &after).await;
+    assert_eq!(review["items"][0]["comment"]["anchor_state"], "orphaned", "{review}");
 }
 
 #[tokio::test]

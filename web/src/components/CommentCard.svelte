@@ -139,7 +139,10 @@
     {/if}
   </div>
   {#if changedQuote && block?.kind !== "table"}<div class="muted small">原文：{truncate(changedQuote, 80)}</div>{/if}
-  {#if comment.anchor_state === "orphaned" && comment.status !== "resolved"}
+  {#if comment.anchor_state === "orphaned" && comment.status === "verify"}
+    <!-- The agent has answered, so the text is usually gone because it did what was asked. -->
+    <div class="muted small">原文已删除或改写，改动见下方对比。</div>
+  {:else if comment.anchor_state === "orphaned" && comment.status !== "resolved"}
     <div class="warn-note">锚定的内容已不在当前版本中。</div>
   {:else if comment.anchor_state === "fuzzy" && comment.status !== "resolved"}
     <div class="warn-note">原文已改动，位置为近似匹配。</div>
