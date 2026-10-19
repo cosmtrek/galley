@@ -981,6 +981,9 @@ async fn edits_give_the_same_result_as_the_full_markdown() {
     assert_eq!(src_a, src_b);
     let ops = |r: &Value| r["extra_changes"].as_array().unwrap().iter().map(|e| e["op"].clone()).collect::<Vec<_>>();
     assert_eq!(ops(&res_a), ops(&res_b));
+    // Only the edits say the agent meant the change outside the comment.
+    assert_eq!(res_a["extra_changes"][0].get("declared"), None, "{res_a}");
+    assert_eq!(res_b["extra_changes"][0]["declared"], true, "{res_b}");
 }
 
 #[tokio::test]
@@ -1066,4 +1069,87 @@ async fn pushing_edits_over_http() {
     assert_eq!(v["seq"], 2);
     let (st, _, _) = t.req("POST", &format!("/api/reports/{rid}/versions"), Who::Agent, Some(json!({ "note": "空" }))).await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
+}
+
+/// Comments the blocks of `before` that `commented` picks from the report (one block comment each) and answers
+/// each with the edits `edits` builds for it, plus top-level edits `outside`. Returns the result and the review.
+async fn edits_round(
+    before: &str,
+    commented: impl Fn(&Value) -> Vec<String>,
+    edits: impl Fn(&Value, usize) -> Value,
+    outside: Value,
+) -> (Value, Value) {
+    let t = T::new().await;
+    let (_, r, _) = t.req("POST", "/api/reports", Who::Agent, Some(json!({ "markdown": before }))).await;
+    let rid = r["id"].as_str().unwrap().to_string();
+    let (_, report, _) = t.req("GET", &format!("/api/reports/{rid}"), Who::Owner, None).await;
+    let mut replies = Vec::new();
+    for (i, block) in commented(&report).into_iter().enumerate() {
+        let anchor = json!({ "type": "block", "block_id": block });
+        let (_, c, _) = t.req("POST", &format!("/api/reports/{rid}/comments"), Who::Owner, Some(json!({ "body": "改", "anchor": anchor }))).await;
+        replies.push(json!({ "comment_id": c["id"], "action": "changed", "body": "已改", "edits": edits(&report, i) }));
+    }
+    let (_, round, _) = t.req("POST", &format!("/api/reports/{rid}/rounds"), Who::Owner, None).await;
+    let round_id = round["id"].as_str().unwrap().to_string();
+    let (st, res, _) = t
+        .req("POST", &format!("/api/rounds/{round_id}/result"), Who::Agent, Some(json!({ "summary": "x", "replies": replies, "edits": outside })))
+        .await;
+    assert_eq!(st, StatusCode::OK, "{res}");
+    let (_, review, _) = t.req("GET", &format!("/api/rounds/{round_id}/review"), Who::Owner, None).await;
+    (res, review)
+}
+
+const TERMS_V1: &str = "---\ntitle: 术语\n---\n\n## 一、简介\n\n大模型的成本在下降。\n\n## 二、应用\n\n大模型用于客服。\n\n## 三、风险\n\n原材料价格波动。\n";
+
+#[tokio::test]
+async fn edits_under_a_reply_belong_to_its_comment_wherever_they_land() {
+    // "Call it LLM throughout" on the first paragraph: the agent changes the term in both sections.
+    let (res, review) =
+        edits_round(TERMS_V1, |r| vec![block_id(r, "成本")], |_, _| json!([{ "old": "大模型", "new": "LLM", "all": true }]), json!([])).await;
+    assert_eq!(res["extra_changes"], json!([]), "{res}");
+    let item = &review["items"][0];
+    let shown: Vec<&str> = item["section_changes"].as_array().unwrap().iter().filter_map(|c| c["new_text"].as_str()).collect();
+    assert_eq!(shown, ["LLM的成本在下降。", "LLM用于客服。"], "{item}");
+}
+
+#[tokio::test]
+async fn a_block_replaced_by_id_keeps_its_id() {
+    let before = "---\ntitle: 图\n---\n\n## 一、架构\n\n<svg width=\"10\"><rect/></svg>\n\n说明文字。\n";
+    let svg = |r: &Value| {
+        let blocks = r["version"]["doc"]["blocks"].as_array().unwrap();
+        blocks.iter().find(|b| b["kind"] == "diagram").unwrap()["id"].as_str().unwrap().to_string()
+    };
+    let (res, review) = edits_round(
+        before,
+        |r| vec![svg(r)],
+        |r, _| json!([{ "block": svg(r), "new": "<svg width=\"300\" height=\"200\"><circle r=\"40\"/><text>全新</text></svg>" }]),
+        json!([]),
+    )
+    .await;
+    assert_eq!(res["extra_changes"], json!([]), "{res}");
+    let item = &review["items"][0];
+    // Redrawn beyond recognition, it is still the same block: an edit, with the comment where it was.
+    assert_eq!(item["comment"]["anchor_state"], "exact", "{item}");
+    assert_eq!(item["change"]["op"], "modified", "{item}");
+    assert_eq!(item["change"]["block_id"], item["comment"]["anchor"]["block_id"], "{item}");
+}
+
+#[tokio::test]
+async fn a_comment_follows_the_text_its_own_edits_wrote() {
+    // The case position alone can't settle (see `a_deleted_paragraph_does_not_follow_its_rewritten_neighbour`):
+    // the edits say which comment the new paragraph answers.
+    let (res, review) = edits_round(
+        REWRITE_V1,
+        |r| vec![block_id(r, "自托管"), block_id(r, "出发点")],
+        |_, i| match i {
+            0 => json!([{ "old": "Galley 是一个自托管的审阅工作台，在报告上写评论再交给 AI 修改。", "new": "像批改文稿一样审阅 AI 写的报告，核对无误后再发布。" }]),
+            _ => json!([{ "old": "它的出发点是替代另一个产品里写报告的流程。\n\n", "new": "" }]),
+        },
+        json!([]),
+    )
+    .await;
+    assert_eq!(res["extra_changes"], json!([]), "{res}");
+    assert_eq!(review["items"][0]["comment"]["anchor_state"], "moved", "{review}");
+    assert_eq!(anchored_text(&review, 0), "像批改文稿一样审阅 AI 写的报告，核对无误后再发布。");
+    assert_eq!(review["items"][1]["comment"]["anchor_state"], "orphaned", "{review}");
 }

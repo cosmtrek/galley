@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::align::{align, assign_fresh};
+use crate::align::{align_pinned, assign_fresh};
 use crate::anchor::{Anchor, AnchorState, relocate};
 use crate::db::{now_ms, random_token, short_id};
 use crate::diff::{BlockChange, BlockDiff, ChangeOp, compare, replacements};
@@ -87,6 +87,10 @@ pub struct ExtraChange {
     pub change: BlockChange,
     /// Handled: either accepted, or turned into a draft comment asking the agent to undo it.
     pub confirmed: bool,
+    /// The agent made it on purpose, as an edit outside the comments, rather than it showing up in a whole new
+    /// Markdown.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub declared: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revert_comment_id: Option<String>,
 }
@@ -105,6 +109,25 @@ pub struct Round {
     pub claimed_at: Option<i64>,
     pub completed_at: Option<i64>,
     pub comment_count: i64,
+    #[serde(skip)]
+    pub attribution: Attribution,
+}
+
+/// Changed blocks of a round result per edit source, known when the agent sent edits instead of whole Markdown.
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+pub struct Attribution {
+    /// Blocks touched by the edits under each comment's reply.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub comments: HashMap<String, Vec<BlockId>>,
+    /// Blocks touched by the edits outside the comments.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outside: Vec<BlockId>,
+}
+
+impl Attribution {
+    fn by_replies(&self) -> impl Iterator<Item = &BlockId> {
+        self.comments.values().flatten()
+    }
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -288,7 +311,7 @@ impl Store {
             "INSERT INTO reports (id, title, summary, created_at, updated_at) VALUES (?1, '', '', ?2, ?2)",
             params![id, now],
         )?;
-        insert_version(&tx, &id, markdown, None, "初稿", &HashMap::new())?;
+        insert_version(&tx, &id, markdown, None, "初稿", &HashMap::new(), &[])?;
         tx.commit()?;
         self.report_info(&id)
     }
@@ -423,13 +446,13 @@ impl Store {
 
     /// Pushes a new version outside the round flow (agent revision or owner rollback).
     pub fn push_version(&mut self, report_id: &str, markdown: &str, note: &str, role: Role) -> AppResult<Version> {
-        self.push_version_pinned(report_id, markdown, note, &HashMap::new(), role)
+        self.push_version_pinned(report_id, markdown, note, &HashMap::new(), &[], role)
     }
 
     /// Pushes a new version given either its whole Markdown or edits against the current version.
     pub fn push(&mut self, report_id: &str, markdown: Option<&str>, edits: &[Edit], note: &str, role: Role) -> AppResult<Version> {
-        let markdown = match (markdown, edits.is_empty()) {
-            (Some(md), true) => md.to_string(),
+        let applied = match (markdown, edits.is_empty()) {
+            (Some(md), true) => edit::Applied { markdown: md.to_string(), spans: Vec::new() },
             (None, true) => return Err(AppError::BadRequest("缺少 markdown 或 edits".into())),
             (Some(_), false) => {
                 return Err(AppError::BadRequest("markdown 和 edits 只能二选一：要么提交完整的新 Markdown，要么只提交改动".into()));
@@ -442,7 +465,7 @@ impl Store {
                     .map_err(|e| AppError::BadRequest(format!("{e}。本次推送未生效")))?
             }
         };
-        self.push_version(report_id, &markdown, note, role)
+        self.push_version_pinned(report_id, &applied.markdown, note, &HashMap::new(), &applied.spans, role)
     }
 
     fn push_version_pinned(
@@ -451,12 +474,13 @@ impl Store {
         markdown: &str,
         note: &str,
         pinned: &HashMap<String, String>,
+        spans: &[edit::Span],
         role: Role,
     ) -> AppResult<Version> {
         ensure_not_archived(&self.conn, report_id, role)?;
         self.ensure_no_pending_round(report_id)?;
         let tx = self.conn.transaction()?;
-        let (vid, relocs) = insert_version(&tx, report_id, markdown, None, note, pinned)?;
+        let (vid, relocs) = insert_version(&tx, report_id, markdown, None, note, pinned, spans)?;
         for (cid, state) in relocs {
             if state == AnchorState::Orphaned {
                 transition_comment(&tx, &cid, CommentAction::Orphan, Role::Agent)?;
@@ -477,7 +501,7 @@ impl Store {
         }
         // Restore the images the target was rendered with, not whatever was uploaded since.
         let pinned = asset_refs(&target.html, &asset_prefix(report_id));
-        self.push_version_pinned(report_id, &target.markdown, &format!("回退到 v{}", target.seq), &pinned, Role::Owner)
+        self.push_version_pinned(report_id, &target.markdown, &format!("回退到 v{}", target.seq), &pinned, &[], Role::Owner)
     }
 
     pub fn compare(&self, from: &str, to: &str) -> AppResult<Comparison> {
@@ -870,11 +894,11 @@ impl Store {
 
         let base = load_version(&tx, &round.base_version_id)?;
         let edits = req.sourced_edits();
-        let markdown = match (req.markdown.as_deref(), edits.is_empty()) {
+        let applied = match (req.markdown.as_deref(), edits.is_empty()) {
             (Some(_), false) => {
                 return Err(AppError::BadRequest("markdown 和 edits 只能二选一：要么提交完整的新 Markdown，要么只提交改动".into()));
             }
-            (md, true) => md.map(str::to_string),
+            (md, true) => md.map(|m| edit::Applied { markdown: m.to_string(), spans: Vec::new() }),
             (None, false) => Some(
                 edit::apply(&base.markdown, &base.doc, &edits)
                     .map_err(|e| AppError::BadRequest(format!("{e}。本次提交未生效")))?,
@@ -884,9 +908,11 @@ impl Store {
         let mut relocs = Vec::new();
         let mut diff = None;
         let mut result_doc = None;
-        if let Some(md) = markdown.as_deref().filter(|m| m.trim() != base.markdown.trim()) {
+        let mut attribution = Attribution::default();
+        if let Some(applied) = applied.as_ref().filter(|a| a.markdown.trim() != base.markdown.trim()) {
+            let md = applied.markdown.as_str();
             let note = format!("第 {} 轮修改", round.seq);
-            let (vid, r) = insert_version(&tx, &round.report_id, md, Some(round_id), &note, &HashMap::new())?;
+            let (vid, r) = insert_version(&tx, &round.report_id, md, Some(round_id), &note, &HashMap::new(), &applied.spans)?;
             let result = load_version(&tx, &vid)?;
             // Tables already broken in the base are the owner's content, not this result's fault.
             let pre_existing = |text: &str| base.doc.blocks.iter().any(|b| b.kind == BlockKind::Paragraph && b.text == text);
@@ -895,6 +921,9 @@ impl Store {
                 return Err(AppError::BadRequest(format!(
                     "Markdown 第 {line} 行附近的表格无法解析，会显示成一段竖线文字。检查表头、分隔行（如 | --- | --- |）和每一行的列数是否一致，修好后重新提交；本次提交未生效"
                 )));
+            }
+            if let Some(d) = &result.diff {
+                attribution = attribute(&applied.spans, &base, &result.markdown, &result.doc, d);
             }
             result_vid = vid;
             relocs = r;
@@ -912,7 +941,7 @@ impl Store {
             insert_message(&tx, &r.comment_id, Role::Agent, Some(&r.action), r.body.trim(), Some(round_id))?;
         }
         if let Some(result) = &result_doc {
-            follow_rewrites(&tx, round_id, &base, result, &result_vid, &mut relocs)?;
+            follow_rewrites(&tx, round_id, &base, result, &result_vid, &attribution, &mut relocs)?;
         }
         for (cid, state) in &relocs {
             if *state == AnchorState::Orphaned {
@@ -921,12 +950,20 @@ impl Store {
         }
 
         let extra = match (&diff, &result_doc) {
-            (Some(d), Some(result)) => extra_changes(&tx, round_id, &base.doc, result, d)?,
+            (Some(d), Some(result)) => extra_changes(&tx, round_id, &base.doc, result, d, &attribution)?,
             _ => Vec::new(),
         };
         tx.execute(
-            "UPDATE rounds SET status = ?2, result_version_id = ?3, summary = ?4, extra_changes = ?5 WHERE id = ?1",
-            params![round_id, next.as_str(), result_vid, req.summary.trim(), serde_json::to_string(&extra)?],
+            "UPDATE rounds SET status = ?2, result_version_id = ?3, summary = ?4, extra_changes = ?5, attribution = ?6
+             WHERE id = ?1",
+            params![
+                round_id,
+                next.as_str(),
+                result_vid,
+                req.summary.trim(),
+                serde_json::to_string(&extra)?,
+                serde_json::to_string(&attribution)?
+            ],
         )?;
         maybe_complete_round(&tx, round_id)?;
         touch_report(&tx, &round.report_id)?;
@@ -1096,6 +1133,16 @@ impl Store {
                             break;
                         }
                     }
+                }
+            }
+            // Edits sent under this comment's reply may reach beyond what it was anchored on (e.g. a term changed
+            // throughout); list every block they touched.
+            if let Some(attributed) = round.attribution.comments.get(&c.id) {
+                let mut ids: HashSet<String> = section_changes.iter().chain(&change).map(|ch| ch.block_id.clone()).collect();
+                if attributed.iter().any(|b| !ids.contains(b)) {
+                    ids.extend(attributed.iter().cloned());
+                    change = None;
+                    section_changes = diff.changes.iter().filter(|ch| ids.contains(&ch.block_id)).cloned().collect();
                 }
             }
             let section_title = c.section_id.as_ref().and_then(|s| titles.get(s).cloned());
@@ -1437,6 +1484,7 @@ fn insert_version(
     round_id: Option<&str>,
     note: &str,
     pinned: &HashMap<String, String>,
+    spans: &[edit::Span],
 ) -> AppResult<(String, Vec<(String, AnchorState)>)> {
     if markdown.trim().is_empty() {
         return Err(AppError::BadRequest("Markdown 内容为空".into()));
@@ -1460,7 +1508,8 @@ fn insert_version(
     let mut doc = parse(markdown, &asset_url);
     let diff = match &prev {
         Some(p) => {
-            align(&p.doc, &mut doc);
+            let pins = block_pins(spans, p, markdown, &doc);
+            align_pinned(&p.doc, &mut doc, &pins);
             Some(compare(&p.doc, &doc))
         }
         None => {
@@ -1541,10 +1590,10 @@ fn load_version(conn: &Connection, id: &str) -> AppResult<Version> {
 
 /// Reads a round exactly as stored. State changes must start from this, not from `load_round`.
 fn load_round_raw(conn: &Connection, id: &str) -> AppResult<Round> {
-    let (mut round, status, extra): (Round, String, String) = conn.query_row(
+    let (mut round, status, extra, attribution): (Round, String, String, String) = conn.query_row(
         "SELECT id, report_id, seq, status, base_version_id, result_version_id, summary, extra_changes,
                 submitted_at, claimed_at, completed_at,
-                (SELECT COUNT(*) FROM comments WHERE round_id = rounds.id)
+                (SELECT COUNT(*) FROM comments WHERE round_id = rounds.id), attribution
          FROM rounds WHERE id = ?1",
         [id],
         |r| {
@@ -1561,13 +1610,15 @@ fn load_round_raw(conn: &Connection, id: &str) -> AppResult<Round> {
                 claimed_at: r.get(9)?,
                 completed_at: r.get(10)?,
                 comment_count: r.get(11)?,
+                attribution: Attribution::default(),
             };
-            Ok((round, r.get(3)?, r.get(7)?))
+            Ok((round, r.get(3)?, r.get(7)?, r.get(12)?))
         },
     )?;
     round.status = RoundStatus::parse(&status).ok_or_else(|| AppError::Internal(format!("bad round status {status}")))?;
     // Failing loudly matters: a defaulted empty list would be written back by `confirm_extra`.
     round.extra_changes = serde_json::from_str(&extra)?;
+    round.attribution = serde_json::from_str(&attribution)?;
     Ok(round)
 }
 
@@ -1770,17 +1821,76 @@ fn packet_comment(c: &Comment, doc: &Doc, markdown: &str) -> PacketComment {
 /// Changed blocks that no comment of this round covers. A rewrite too different to keep its block id comes out as
 /// "deleted + added"; its added blocks count as covered only when the round asked for the whole rewrite (see
 /// `requested_rewrites`), so new material next to a commented paragraph is still flagged.
-fn extra_changes(tx: &Transaction, round_id: &str, base: &Doc, result: &Doc, diff: &BlockDiff) -> AppResult<Vec<ExtraChange>> {
+/// Blocks the agent changed through a comment's reply are covered wherever they are.
+fn extra_changes(
+    tx: &Transaction,
+    round_id: &str,
+    base: &Doc,
+    result: &Doc,
+    diff: &BlockDiff,
+    attribution: &Attribution,
+) -> AppResult<Vec<ExtraChange>> {
     let mut covered = commented_blocks(tx, round_id, base, result)?;
     for (_, adds) in requested_rewrites(&covered, base, result) {
         covered.extend(adds);
     }
+    covered.extend(attribution.by_replies().cloned());
     Ok(diff
         .changes
         .iter()
         .filter(|c| !covered.contains(&c.block_id))
-        .map(|c| ExtraChange { change: c.clone(), confirmed: false, revert_comment_id: None })
+        .map(|c| ExtraChange {
+            change: c.clone(),
+            confirmed: false,
+            declared: attribution.outside.contains(&c.block_id),
+            revert_comment_id: None,
+        })
         .collect())
+}
+
+/// Which changed blocks each edit touched: a base block over the bytes it replaced, or a result block over the
+/// bytes it wrote.
+fn attribute(spans: &[edit::Span], base: &Version, result_md: &str, result: &Doc, diff: &BlockDiff) -> Attribution {
+    let overlaps = |a: &std::ops::Range<usize>, b: &std::ops::Range<usize>| a.start < b.end && b.start < a.end;
+    let mut out = Attribution::default();
+    for ch in &diff.changes {
+        let old = (ch.op != ChangeOp::Added)
+            .then(|| base.doc.block(&ch.block_id))
+            .flatten()
+            .map(|b| edit::line_range(&base.markdown, b.src_lines));
+        let new = (ch.op != ChangeOp::Deleted)
+            .then(|| result.block(&ch.block_id))
+            .flatten()
+            .map(|b| edit::line_range(result_md, b.src_lines));
+        for s in spans {
+            let hit = old.as_ref().is_some_and(|r| overlaps(r, &s.base)) || new.as_ref().is_some_and(|r| overlaps(r, &s.out));
+            if !hit {
+                continue;
+            }
+            let ids = match &s.comment_id {
+                Some(c) => out.comments.entry(c.clone()).or_default(),
+                None => &mut out.outside,
+            };
+            if !ids.contains(&ch.block_id) {
+                ids.push(ch.block_id.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Alignment pins for `{block, new}` edits: the block written in place of the old one keeps its id, so the
+/// change shows up as an edit of that block rather than a deletion and an addition. Only when the new text is
+/// one block of the same kind.
+fn block_pins(spans: &[edit::Span], prev: &Version, markdown: &str, doc: &Doc) -> Vec<(usize, usize)> {
+    spans
+        .iter()
+        .filter_map(|s| {
+            let i = prev.doc.blocks.iter().position(|b| Some(&b.id) == s.block.as_ref())?;
+            let j = doc.blocks.iter().position(|b| edit::line_range(markdown, b.src_lines) == s.out)?;
+            (prev.doc.blocks[i].kind == doc.blocks[j].kind).then_some((i, j))
+        })
+        .collect()
 }
 
 /// Blocks the comments of a round are about. A section comment, or any comment anchored on a heading, covers the
@@ -1823,10 +1933,11 @@ fn follow_rewrites(
     base: &Version,
     result: &Doc,
     result_vid: &str,
+    attribution: &Attribution,
     relocs: &mut [(String, AnchorState)],
 ) -> AppResult<()> {
     let rewrites = requested_rewrites(&commented_blocks(tx, round_id, &base.doc, result)?, &base.doc, result);
-    if rewrites.is_empty() {
+    if rewrites.is_empty() && attribution.comments.is_empty() {
         return Ok(());
     }
     for (cid, state) in relocs.iter_mut().filter(|(_, s)| *s == AnchorState::Orphaned) {
@@ -1835,8 +1946,34 @@ fn follow_rewrites(
             continue;
         }
         let Some(anchor) = anchor_at(tx, cid, &base.id)? else { continue };
+        if matches!(anchor, Anchor::Document) {
+            continue;
+        }
+        // The comment's own edits wrote new blocks: that is where its text went.
+        let written: Vec<&BlockId> = attribution
+            .comments
+            .get(cid.as_str())
+            .into_iter()
+            .flatten()
+            .filter(|b| base.doc.block(b).is_none())
+            .filter_map(|b| result.block(b))
+            .filter(|b| !matches!(anchor, Anchor::Section { .. }) || b.kind == BlockKind::Heading)
+            .map(|b| &b.id)
+            .collect();
+        let first = result.blocks.iter().find(|b| written.contains(&&b.id));
+        if let Some(b) = first {
+            let moved = match &anchor {
+                Anchor::Section { .. } => Anchor::Section { section_id: b.id.clone() },
+                _ => Anchor::Block { block_id: b.id.clone() },
+            };
+            tx.execute(
+                "UPDATE comment_anchors SET anchor = ?3, state = ?4 WHERE comment_id = ?1 AND version_id = ?2",
+                params![cid.as_str(), result_vid, serde_json::to_string(&moved)?, AnchorState::Moved.as_str()],
+            )?;
+            *state = AnchorState::Moved;
+            continue;
+        }
         let ids: Vec<String> = match &anchor {
-            Anchor::Document => continue,
             Anchor::Section { section_id } => vec![section_id.clone()],
             a => a.block_ids(&base.doc),
         };

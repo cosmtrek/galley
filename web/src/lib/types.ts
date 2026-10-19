@@ -79,6 +79,8 @@ export interface ExtraChange extends BlockChange {
   /** Handled: accepted, or turned into a draft comment (`revert_comment_id`) asking the agent to undo it. */
   confirmed: boolean;
   revert_comment_id?: string | null;
+  /** The agent listed it as an edit outside the comments, rather than it turning up in a whole new Markdown. */
+  declared?: boolean;
 }
 
 export interface Version {

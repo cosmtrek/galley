@@ -736,6 +736,7 @@
               comment={popComment}
               inline
               sectionTitle={popComment.section_id ? titles.get(popComment.section_id) : null}
+              titleOf={sectionTitle}
               block={anchorBlock(popComment)}
               review={reviewOf.get(popComment.id)}
               {ctx}
@@ -795,6 +796,7 @@
               comment={c}
               active={c.id === activeId}
               sectionTitle={c.section_id ? titles.get(c.section_id) : null}
+              titleOf={sectionTitle}
               block={anchorBlock(c)}
               review={reviewOf.get(c.id)}
               {ctx}
@@ -827,7 +829,9 @@
                     onclick={() => focusExtra(ch)}
                     onkeydown={(e) => e.key === "Enter" && e.target === e.currentTarget && focusExtra(ch)}
                   >
-                    <div class="card-loc">{sectionTitle(ch.section_id)}</div>
+                    <div class="card-loc">
+                      {sectionTitle(ch.section_id)}{#if ch.declared}<span title="AI 提交时单独列出了这处改动，不是顺手改的">{" · AI 已说明"}</span>{/if}
+                    </div>
                     <div class="card-change"><ChangeView change={ch} {ctx} showOp={ch.op !== "modified"} /></div>
                     <div class="card-foot mine" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="presentation">
                       <span class="card-status">待确认</span>

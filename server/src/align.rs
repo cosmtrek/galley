@@ -57,21 +57,36 @@ fn strip_heading_number(s: &str) -> &str {
 
 /// Assigns ids (and section ids) to `new` by aligning it with `old`.
 /// Returns, for each new block, the index of the old block it inherits from.
+#[cfg(test)]
 pub fn align(old: &Doc, new: &mut Doc) -> Vec<Option<usize>> {
+    align_pinned(old, new, &[])
+}
+
+/// Like `align`, with some pairs `(old index, new index)` fixed up front: a block the agent replaced by id keeps
+/// that id however different the new text is.
+pub fn align_pinned(old: &Doc, new: &mut Doc, pins: &[(usize, usize)]) -> Vec<Option<usize>> {
     let old_keys: Vec<String> = old.blocks.iter().map(|b| b.align_key()).collect();
     let new_keys: Vec<String> = new.blocks.iter().map(|b| b.align_key()).collect();
     let ops = capture_diff_slices(Algorithm::Myers, &old_keys, &new_keys);
 
     let mut matched: Vec<Option<usize>> = vec![None; new.blocks.len()];
     let mut old_used = vec![false; old.blocks.len()];
+    for &(i, j) in pins {
+        if i < old.blocks.len() && j < new.blocks.len() && !old_used[i] && matched[j].is_none() {
+            matched[j] = Some(i);
+            old_used[i] = true;
+        }
+    }
 
     // Identical blocks win over fuzzy pairing, even across hunks (e.g. moved sections),
     // so a similar-but-different sibling can't steal their id.
     for op in &ops {
         if let DiffOp::Equal { old_index, new_index, len } = *op {
             for k in 0..len {
-                matched[new_index + k] = Some(old_index + k);
-                old_used[old_index + k] = true;
+                if matched[new_index + k].is_none() && !old_used[old_index + k] {
+                    matched[new_index + k] = Some(old_index + k);
+                    old_used[old_index + k] = true;
+                }
             }
         }
     }

@@ -13,6 +13,7 @@
     comment,
     active = false,
     sectionTitle = null,
+    titleOf,
     block = null,
     review = null,
     ctx = null,
@@ -28,6 +29,8 @@
     comment: Comment;
     active?: boolean;
     sectionTitle?: string | null;
+    /** Section titles, for changes that landed outside the comment's section. */
+    titleOf?: (sectionId: string) => string;
     /** Current block of a block/cell anchor, used for a kind-specific label. */
     block?: Block | null;
     /** What the round under verification changed for this comment. */
@@ -55,6 +58,16 @@
         ? blockSummary(block)
         : comment.original_quote,
   );
+  // Edits made for a comment can reach other sections (e.g. a term changed throughout); name a section whenever
+  // the list moves into one other than the comment's.
+  const sectionChanges = $derived.by(() => {
+    let at = comment.section_id ?? "";
+    return withoutPartners(ctx, review?.section_changes ?? []).map((ch) => {
+      const head = titleOf && ch.section_id !== at ? titleOf(ch.section_id) : null;
+      at = ch.section_id;
+      return { ch, head };
+    });
+  });
   const changedQuote = $derived(
     comment.original_quote && quote && comment.original_quote !== quote ? comment.original_quote : null,
   );
@@ -156,8 +169,9 @@
     <div class="card-change">
       {#if review.change}
         <ChangeView change={review.change} {ctx} showOp={false} />
-      {:else if review.section_changes.length}
-        {#each withoutPartners(ctx, review.section_changes) as ch (ch.op + ch.block_id)}
+      {:else if sectionChanges.length}
+        {#each sectionChanges as { ch, head } (ch.op + ch.block_id)}
+          {#if head !== null}<div class="card-loc">{head}</div>{/if}
           <ChangeView change={ch} {ctx} />
         {/each}
       {:else if comment.anchor.type === "document"}

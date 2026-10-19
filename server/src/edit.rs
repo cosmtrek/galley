@@ -41,9 +41,25 @@ impl Sourced<'_> {
     }
 }
 
-/// Applies `edits` to `base` (whose parsed form is `doc`) and returns the new Markdown. The error is a
-/// message for the agent naming the edit that failed.
-pub fn apply(base: &str, doc: &Doc, edits: &[Sourced]) -> Result<String, String> {
+/// Where one edit landed: the bytes it replaced in the base and the bytes its text took in the result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Span {
+    pub comment_id: Option<String>,
+    /// The block it replaced whole, for `{block, new}` edits.
+    pub block: Option<String>,
+    pub base: Range<usize>,
+    pub out: Range<usize>,
+}
+
+pub struct Applied {
+    pub markdown: String,
+    /// In document order.
+    pub spans: Vec<Span>,
+}
+
+/// Applies `edits` to `base` (whose parsed form is `doc`). The error is a message for the agent naming the
+/// edit that failed.
+pub fn apply(base: &str, doc: &Doc, edits: &[Sourced]) -> Result<Applied, String> {
     let mut spans: Vec<(Range<usize>, &str, usize)> = Vec::new();
     for (i, s) in edits.iter().enumerate() {
         let e = s.edit;
@@ -86,18 +102,26 @@ pub fn apply(base: &str, doc: &Doc, edits: &[Sourced]) -> Result<String, String>
         }
     }
     let mut out = String::with_capacity(base.len());
+    let mut landed = Vec::with_capacity(spans.len());
     let mut at = 0;
-    for (r, new, _) in &spans {
+    for (r, new, i) in spans {
         out.push_str(&base[at..r.start]);
+        let start = out.len();
         out.push_str(new);
+        landed.push(Span {
+            comment_id: edits[i].comment_id.map(str::to_string),
+            block: edits[i].edit.block.clone(),
+            base: r.clone(),
+            out: start..out.len(),
+        });
         at = r.end;
     }
     out.push_str(&base[at..]);
-    Ok(out)
+    Ok(Applied { markdown: out, spans: landed })
 }
 
 /// Byte range of 1-based inclusive lines, without the final line break.
-fn line_range(src: &str, (first, last): (u32, u32)) -> Range<usize> {
+pub fn line_range(src: &str, (first, last): (u32, u32)) -> Range<usize> {
     let starts: Vec<usize> = std::iter::once(0).chain(src.match_indices('\n').map(|(i, _)| i + 1)).collect();
     let start = starts.get(first.saturating_sub(1) as usize).copied().unwrap_or(src.len());
     let mut end = starts.get(last as usize).map_or(src.len(), |&next| next - 1);
@@ -132,7 +156,7 @@ mod tests {
     fn run_on(d: &Doc, edits: &[Edit]) -> Result<String, String> {
         let sourced: Vec<Sourced> =
             edits.iter().enumerate().map(|(i, e)| Sourced { edit: e, comment_id: Some("c_1"), index: i + 1 }).collect();
-        apply(MD, d, &sourced)
+        apply(MD, d, &sourced).map(|a| a.markdown)
     }
 
     fn run(edits: &[Edit]) -> Result<String, String> {
@@ -194,6 +218,20 @@ mod tests {
         let item = d.blocks.iter().find(|b| b.text == "第二项").unwrap().id.clone();
         let out = run_on(&d, &[block(&item, "- 第二项，改过")]).unwrap();
         assert!(out.contains("- 大模型\n- 第二项，改过\n"), "{out:?}");
+    }
+
+    #[test]
+    fn spans_say_where_each_edit_landed() {
+        let d = doc();
+        let edits = [text("原材料", "上游原材料"), text("120 GW", "130 GW")];
+        let sourced = [
+            Sourced { edit: &edits[0], comment_id: None, index: 1 },
+            Sourced { edit: &edits[1], comment_id: Some("c_1"), index: 1 },
+        ];
+        let a = apply(MD, &d, &sourced).unwrap();
+        let [first, second] = &a.spans[..] else { panic!("{:?}", a.spans) };
+        assert_eq!((first.comment_id.as_deref(), &MD[first.base.clone()], &a.markdown[first.out.clone()]), (Some("c_1"), "120 GW", "130 GW"));
+        assert_eq!((second.comment_id.as_deref(), &MD[second.base.clone()], &a.markdown[second.out.clone()]), (None, "原材料", "上游原材料"));
     }
 
     #[test]
