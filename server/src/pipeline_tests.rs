@@ -381,3 +381,29 @@ fn diagrams_render_as_images() {
     assert!(!d.render_html().contains("<svg"));
     assert!(d.blocks[4].html.contains("&lt;div"), "{}", d.blocks[4].html);
 }
+
+/// Ops of the diff from `src_old` to `src_new`, one per changed diagram.
+fn diagram_ops(src_old: &str, src_new: &str) -> Vec<ChangeOp> {
+    let mut old = parse(src_old, &prefix("/a/"));
+    assign_fresh(&mut old);
+    let mut new = parse(src_new, &prefix("/a/"));
+    align(&old, &mut new);
+    compare(&old, &new).changes.iter().filter(|c| c.kind == BlockKind::Diagram).map(|c| c.op).collect()
+}
+
+#[test]
+fn a_lone_redrawn_diagram_is_modified() {
+    let svg = |s: &str| format!("<svg width=\"10\">{s}</svg>");
+    let mermaid = |s: &str| format!("```mermaid\ngraph TD\n{s}\n```");
+    let doc = |figs: &[String]| format!("# T\n\n说明。\n\n{}\n\n结尾。\n", figs.join("\n\n说明。\n\n"));
+
+    assert_eq!(diagram_ops(&doc(&[svg("<rect/>")]), &doc(&[svg("<circle r=\"3\"/>")])), [ChangeOp::Modified]);
+    assert_eq!(diagram_ops(&doc(&[mermaid("A-->B")]), &doc(&[mermaid("X-->Y-->Z")])), [ChangeOp::Modified]);
+    // A different kind of figure is a replacement, not an edit.
+    let ops = diagram_ops(&doc(&[mermaid("A-->B")]), &doc(&[svg("<rect/>")]));
+    assert!(ops.contains(&ChangeOp::Deleted) && ops.contains(&ChangeOp::Added), "{ops:?}");
+    // Two redrawn in one stretch: no telling which became which.
+    let two = |a: &str, b: &str| format!("# T\n\n说明。\n\n{}\n\n{}\n\n结尾。\n", svg(a), svg(b));
+    let ops = diagram_ops(&two("<rect/>", "<line/>"), &two("<circle r=\"1\"/>", "<circle r=\"2\"/>"));
+    assert!(!ops.contains(&ChangeOp::Modified), "{ops:?}");
+}

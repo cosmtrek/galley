@@ -696,7 +696,7 @@ async fn a_text_comment_with_a_question_follows_the_rewrite_and_stays_a_question
 }
 
 #[tokio::test]
-async fn a_comment_follows_a_redrawn_diagram() {
+async fn a_redrawn_diagram_keeps_its_id_and_its_comment() {
     let before = "---\ntitle: 图\n---\n\n## 架构\n\n第一段说明。\n\n<svg width=\"200\" height=\"100\"><text x=\"20\" y=\"35\">入口</text></svg>\n\n第二段说明。\n";
     let after = before.replace("<text x=\"20\" y=\"35\">入口</text>", "<rect width=\"120\" height=\"40\"/><text x=\"20\" y=\"35\">入口和网关</text>");
     let review = anchored_round(
@@ -710,9 +710,11 @@ async fn a_comment_follows_a_redrawn_diagram() {
         &after,
     )
     .await;
-    let c = &review["items"][0]["comment"];
-    assert_eq!(c["anchor_state"], "moved", "{review}");
-    assert_ne!(review["items"][0]["base_anchor"]["block_id"], c["anchor"]["block_id"], "the diagram got a new block id: {review}");
+    // The only diagram on either side of the change is the same figure redrawn: modified, not deleted + added.
+    let item = &review["items"][0];
+    assert_eq!(item["comment"]["anchor_state"], "exact", "{review}");
+    assert_eq!(item["base_anchor"]["block_id"], item["comment"]["anchor"]["block_id"], "{review}");
+    assert_eq!(item["change"]["op"], "modified", "{review}");
 }
 
 #[tokio::test]
@@ -1071,11 +1073,11 @@ async fn pushing_edits_over_http() {
     assert_eq!(st, StatusCode::BAD_REQUEST);
 }
 
-/// Comments the blocks of `before` that `commented` picks from the report (one block comment each) and answers
-/// each with the edits `edits` builds for it, plus top-level edits `outside`. Returns the result and the review.
+/// Comments on `before` with the anchors `anchors` builds from the report and answers each with the edits `edits`
+/// builds for it, plus top-level edits `outside`. Returns the result and the review.
 async fn edits_round(
     before: &str,
-    commented: impl Fn(&Value) -> Vec<String>,
+    anchors: impl Fn(&Value) -> Vec<Value>,
     edits: impl Fn(&Value, usize) -> Value,
     outside: Value,
 ) -> (Value, Value) {
@@ -1084,8 +1086,7 @@ async fn edits_round(
     let rid = r["id"].as_str().unwrap().to_string();
     let (_, report, _) = t.req("GET", &format!("/api/reports/{rid}"), Who::Owner, None).await;
     let mut replies = Vec::new();
-    for (i, block) in commented(&report).into_iter().enumerate() {
-        let anchor = json!({ "type": "block", "block_id": block });
+    for (i, anchor) in anchors(&report).into_iter().enumerate() {
         let (_, c, _) = t.req("POST", &format!("/api/reports/{rid}/comments"), Who::Owner, Some(json!({ "body": "改", "anchor": anchor }))).await;
         replies.push(json!({ "comment_id": c["id"], "action": "changed", "body": "已改", "edits": edits(&report, i) }));
     }
@@ -1099,13 +1100,17 @@ async fn edits_round(
     (res, review)
 }
 
+fn on_block(id: String) -> Value {
+    json!({ "type": "block", "block_id": id })
+}
+
 const TERMS_V1: &str = "---\ntitle: 术语\n---\n\n## 一、简介\n\n大模型的成本在下降。\n\n## 二、应用\n\n大模型用于客服。\n\n## 三、风险\n\n原材料价格波动。\n";
 
 #[tokio::test]
 async fn edits_under_a_reply_belong_to_its_comment_wherever_they_land() {
     // "Call it LLM throughout" on the first paragraph: the agent changes the term in both sections.
     let (res, review) =
-        edits_round(TERMS_V1, |r| vec![block_id(r, "成本")], |_, _| json!([{ "old": "大模型", "new": "LLM", "all": true }]), json!([])).await;
+        edits_round(TERMS_V1, |r| vec![on_block(block_id(r, "成本"))], |_, _| json!([{ "old": "大模型", "new": "LLM", "all": true }]), json!([])).await;
     assert_eq!(res["extra_changes"], json!([]), "{res}");
     let item = &review["items"][0];
     let shown: Vec<&str> = item["section_changes"].as_array().unwrap().iter().filter_map(|c| c["new_text"].as_str()).collect();
@@ -1121,7 +1126,7 @@ async fn a_block_replaced_by_id_keeps_its_id() {
     };
     let (res, review) = edits_round(
         before,
-        |r| vec![svg(r)],
+        |r| vec![on_block(svg(r))],
         |r, _| json!([{ "block": svg(r), "new": "<svg width=\"300\" height=\"200\"><circle r=\"40\"/><text>全新</text></svg>" }]),
         json!([]),
     )
@@ -1140,7 +1145,7 @@ async fn a_comment_follows_the_text_its_own_edits_wrote() {
     // the edits say which comment the new paragraph answers.
     let (res, review) = edits_round(
         REWRITE_V1,
-        |r| vec![block_id(r, "自托管"), block_id(r, "出发点")],
+        |r| vec![on_block(block_id(r, "自托管")), on_block(block_id(r, "出发点"))],
         |_, i| match i {
             0 => json!([{ "old": "Galley 是一个自托管的审阅工作台，在报告上写评论再交给 AI 修改。", "new": "像批改文稿一样审阅 AI 写的报告，核对无误后再发布。" }]),
             _ => json!([{ "old": "它的出发点是替代另一个产品里写报告的流程。\n\n", "new": "" }]),
@@ -1152,4 +1157,30 @@ async fn a_comment_follows_the_text_its_own_edits_wrote() {
     assert_eq!(review["items"][0]["comment"]["anchor_state"], "moved", "{review}");
     assert_eq!(anchored_text(&review, 0), "像批改文稿一样审阅 AI 写的报告，核对无误后再发布。");
     assert_eq!(review["items"][1]["comment"]["anchor_state"], "orphaned", "{review}");
+}
+
+#[tokio::test]
+async fn a_whole_document_comment_covers_changes_anywhere() {
+    // "Polish the whole report": every paragraph and heading changes, none of it extra.
+    let after = REWRITE_V1
+        .replace("## 一、简介", "## 一、概述")
+        .replace("Galley 是一个自托管的审阅工作台，在报告上写评论再交给 AI 修改。", "像批改文稿一样审阅 AI 写的报告。")
+        .replace("用 Docker 启动。", "用 Docker Compose 一条命令启动。");
+    let review = anchored_round(REWRITE_V1, |_| vec![json!({ "type": "document" })], "changed", &after).await;
+    assert_eq!(review["round"]["extra_changes"], json!([]), "{review}");
+}
+
+#[tokio::test]
+async fn a_whole_document_comment_leaves_declared_edits_extra() {
+    // The agent set the risk edit apart from the comment, so it is still for the owner to confirm.
+    let (res, _) = edits_round(
+        TERMS_V1,
+        |_| vec![json!({ "type": "document" })],
+        |_, _| json!([{ "old": "大模型", "new": "LLM", "all": true }]),
+        json!([{ "old": "原材料价格波动。", "new": "原材料价格波动较大。" }]),
+    )
+    .await;
+    let extra = res["extra_changes"].as_array().unwrap();
+    assert_eq!(extra.len(), 1, "{res}");
+    assert_eq!((extra[0]["new_text"].as_str(), &extra[0]["declared"]), (Some("原材料价格波动较大。"), &json!(true)), "{res}");
 }

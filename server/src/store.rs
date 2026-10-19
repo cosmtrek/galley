@@ -1835,6 +1835,17 @@ fn extra_changes(
         covered.extend(adds);
     }
     covered.extend(attribution.by_replies().cloned());
+    // A comment on the whole document asks for changes anywhere, so only what the agent itself set apart from the
+    // comments is extra.
+    let whole: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM comments c JOIN comment_anchors ca ON ca.comment_id = c.id
+         WHERE c.round_id = ?1 AND json_extract(ca.anchor, '$.type') = 'document')",
+        [round_id],
+        |r| r.get(0),
+    )?;
+    if whole {
+        covered.extend(diff.changes.iter().map(|c| c.block_id.clone()).filter(|b| !attribution.outside.contains(b)));
+    }
     Ok(diff
         .changes
         .iter()

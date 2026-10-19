@@ -49,6 +49,11 @@ fn block_similarity(a: &Block, b: &Block) -> f32 {
     similarity(&a.text, &b.text)
 }
 
+/// "mermaid" or "svg", from the signature the parser gives diagrams.
+fn diagram_type(b: &Block) -> &str {
+    b.sig.split_once(':').map_or("", |(t, _)| t)
+}
+
 fn strip_heading_number(s: &str) -> &str {
     let t = s.trim_start();
     let rest = t.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '、');
@@ -127,6 +132,19 @@ pub fn align_pinned(old: &Doc, new: &mut Doc, pins: &[(usize, usize)]) -> Vec<Op
                     old_used[i] = true;
                     min_old = i + 1;
                 }
+            }
+            // A redrawn diagram shares no text with the old one, so similarity can't pair them. One left over
+            // on each side of the same hunk, of the same type, is the same figure redrawn.
+            let diagrams = |blocks: &[Block], range: std::ops::Range<usize>, free: &dyn Fn(usize) -> bool| {
+                range.filter(|&k| free(k) && blocks[k].kind == BlockKind::Diagram).collect::<Vec<_>>()
+            };
+            let olds = diagrams(&old.blocks, ho.clone(), &|i| !old_used[i]);
+            let news = diagrams(&new.blocks, hn.clone(), &|j| matched[j].is_none());
+            if let ([i], [j]) = (&olds[..], &news[..])
+                && diagram_type(&old.blocks[*i]) == diagram_type(&new.blocks[*j])
+            {
+                matched[*j] = Some(*i);
+                old_used[*i] = true;
             }
         }
         *ho = usize::MAX..0;
