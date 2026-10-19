@@ -943,3 +943,127 @@ async fn sessions_are_stored_hashed() {
     assert_eq!(n, 0);
     assert!(store.session_valid(&raw).unwrap());
 }
+
+/// A report from V1 with a submitted round of one block comment on the growth figure: `(rid, round_id, comment_id)`.
+async fn round_on_growth(t: &T) -> (String, String, String) {
+    let (_, r, _) = t.req("POST", "/api/reports", Who::Agent, Some(json!({ "markdown": V1 }))).await;
+    let rid = r["id"].as_str().unwrap().to_string();
+    let (_, report, _) = t.req("GET", &format!("/api/reports/{rid}"), Who::Owner, None).await;
+    let anchor = json!({ "type": "block", "block_id": block_id(&report, "同比增长") });
+    let (_, c, _) = t.req("POST", &format!("/api/reports/{rid}/comments"), Who::Owner, Some(json!({ "body": "核实", "anchor": anchor }))).await;
+    let (_, round, _) = t.req("POST", &format!("/api/reports/{rid}/rounds"), Who::Owner, None).await;
+    (rid, round["id"].as_str().unwrap().to_string(), c["id"].as_str().unwrap().to_string())
+}
+
+#[tokio::test]
+async fn edits_give_the_same_result_as_the_full_markdown() {
+    let full = T::new().await;
+    let (rid_a, round_a, cid_a) = round_on_growth(&full).await;
+    let (st, res_a, _) = full
+        .req("POST", &format!("/api/rounds/{round_a}/result"), Who::Agent, Some(json!({ "markdown": V2, "summary": "x",
+            "replies": [{ "comment_id": cid_a, "action": "changed", "body": "已改" }] })))
+        .await;
+    assert_eq!(st, StatusCode::OK, "{res_a}");
+
+    let edits = T::new().await;
+    let (rid_b, round_b, cid_b) = round_on_growth(&edits).await;
+    let (st, res_b, _) = edits
+        .req("POST", &format!("/api/rounds/{round_b}/result"), Who::Agent, Some(json!({ "summary": "x",
+            "replies": [{ "comment_id": cid_b, "action": "changed", "body": "已改",
+                "edits": [{ "old": "同比增长 10%", "new": "同比增长 12.3%（来源：BNEF）" }] }],
+            "edits": [{ "old": "原材料价格波动。", "new": "原材料价格波动。另有新增一句。" }] })))
+        .await;
+    assert_eq!(st, StatusCode::OK, "{res_b}");
+
+    let (_, src_a, _) = full.req("GET", &format!("/api/reports/{rid_a}/source?format=raw"), Who::Owner, None).await;
+    let (_, src_b, _) = edits.req("GET", &format!("/api/reports/{rid_b}/source?format=raw"), Who::Owner, None).await;
+    assert_eq!(src_b, Value::String(V2.into()));
+    assert_eq!(src_a, src_b);
+    let ops = |r: &Value| r["extra_changes"].as_array().unwrap().iter().map(|e| e["op"].clone()).collect::<Vec<_>>();
+    assert_eq!(ops(&res_a), ops(&res_b));
+}
+
+#[tokio::test]
+async fn a_failing_edit_rejects_the_whole_result() {
+    let t = T::new().await;
+    let (rid, round_id, cid) = round_on_growth(&t).await;
+    let path = format!("/api/rounds/{round_id}/result");
+    let reply = |edits: Value| json!({ "comment_id": cid, "action": "changed", "body": "已改", "edits": edits });
+
+    // The first edit is fine, the second can't be found: nothing is applied.
+    let body = json!({ "summary": "x", "replies": [reply(json!([
+        { "old": "同比增长 10%", "new": "同比增长 12.3%" },
+        { "old": "不存在的句子", "new": "x" }
+    ]))] });
+    let (st, err, _) = t.req("POST", &path, Who::Agent, Some(body)).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let msg = err["error"].as_str().unwrap();
+    assert!(msg.contains(&format!("{cid} 的第 2 条 edit")) && msg.contains("找不到") && msg.contains("未生效"), "{msg}");
+
+    let both = json!({ "summary": "x", "markdown": V2, "replies": [reply(json!([{ "old": "同比增长 10%", "new": "y" }]))] });
+    let (st, err, _) = t.req("POST", &path, Who::Agent, Some(both)).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert!(err["error"].as_str().unwrap().contains("二选一"), "{err}");
+
+    let answered = json!({ "summary": "x", "replies": [{ "comment_id": cid, "action": "answered", "body": "数字没错",
+        "edits": [{ "old": "同比增长 10%", "new": "y" }] }] });
+    let (st, err, _) = t.req("POST", &path, Who::Agent, Some(answered)).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert!(err["error"].as_str().unwrap().contains("不能带 edits"), "{err}");
+
+    let (_, rd, _) = t.req("GET", &format!("/api/rounds/{round_id}"), Who::Owner, None).await;
+    assert_eq!(rd["status"], "submitted", "{rd}");
+    let (_, versions, _) = t.req("GET", &format!("/api/reports/{rid}/versions"), Who::Owner, None).await;
+    assert_eq!(versions.as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn agents_submit_and_push_edits_over_mcp() {
+    let t = T::new().await;
+    let tool = |name: &str, args: Value| {
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": name, "arguments": args } })
+    };
+    let text = |v: &Value| v["result"]["content"][0]["text"].as_str().unwrap().to_string();
+    let (rid, round_id, cid) = round_on_growth(&t).await;
+
+    // The packet carries what a block edit needs: the block id and its source.
+    let (_, packet, _) = t.req("POST", "/mcp", Who::Agent, Some(tool("galley_get_round", json!({ "report_id": rid })))).await;
+    let packet = text(&packet);
+    let (_, report, _) = t.req("GET", &format!("/api/reports/{rid}"), Who::Owner, None).await;
+    let block = block_id(&report, "同比增长");
+    assert!(packet.contains(&format!("块 `{block}`")) && packet.contains("```markdown\n2025 年装机 120 GW，同比增长 10%。\n```"), "{packet}");
+
+    let (_, res, _) = t
+        .req("POST", "/mcp", Who::Agent, Some(tool("galley_submit_round", json!({ "round_id": round_id, "summary": "x",
+            "replies": [{ "comment_id": cid, "action": "changed", "body": "重写了这一段",
+                "edits": [{ "block": block, "new": "2025 年新增装机 120 GW，增速放缓到 10%。" }] }] })))).await;
+    assert_eq!(res["result"]["isError"], false, "{res}");
+    t.req("POST", &format!("/api/comments/{cid}/resolve"), Who::Owner, None).await;
+
+    let (_, pushed, _) = t
+        .req("POST", "/mcp", Who::Agent, Some(tool("galley_push_version", json!({ "report_id": rid,
+            "edits": [{ "old": "原材料价格波动。", "new": "原材料价格波动较大。" }] })))).await;
+    assert_eq!(pushed["result"]["isError"], false, "{pushed}");
+    let (_, src, _) = t.req("GET", &format!("/api/reports/{rid}/source?format=raw"), Who::Owner, None).await;
+    let src = src.as_str().unwrap();
+    assert!(src.contains("增速放缓到 10%") && src.contains("原材料价格波动较大。") && !src.contains("同比增长"), "{src}");
+
+    let (_, err, _) = t
+        .req("POST", "/mcp", Who::Agent, Some(tool("galley_push_version", json!({ "report_id": rid,
+            "edits": [{ "old": "原材料价格波动较大。", "new": "x" }], "markdown": V1 })))).await;
+    assert!(err["result"]["isError"] == true && text(&err).contains("二选一"), "{err}");
+}
+
+#[tokio::test]
+async fn pushing_edits_over_http() {
+    let t = T::new().await;
+    let (_, r, _) = t.req("POST", "/api/reports", Who::Agent, Some(json!({ "markdown": V1 }))).await;
+    let rid = r["id"].as_str().unwrap().to_string();
+    let (st, v, _) = t
+        .req("POST", &format!("/api/reports/{rid}/versions"), Who::Agent, Some(json!({ "edits": [{ "old": "10%", "new": "12.3%" }], "note": "改数字" })))
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["seq"], 2);
+    let (st, _, _) = t.req("POST", &format!("/api/reports/{rid}/versions"), Who::Agent, Some(json!({ "note": "空" }))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+}

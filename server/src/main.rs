@@ -5,6 +5,7 @@ mod db;
 mod diff;
 mod doc;
 mod domain;
+mod edit;
 mod error;
 mod mcp;
 mod packet_md;

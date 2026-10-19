@@ -88,7 +88,7 @@ cd server && cargo build --release && cd ..
      --header "Authorization: Bearer <GALLEY_AGENT_TOKEN>"
    ```
 
-   不支持 MCP 的 AI 可以用 HTTP 接口：`GET /api/pending` 列出等待处理的轮次，`GET /api/rounds/<id>/packet?format=md` 返回一轮的评论、上下文和处理要求。图片用 `POST /api/reports/<id>/assets?name=fig.png` 上传（请求体是文件原始内容），在报告里写成 `![](assets/fig.png)`。
+   不支持 MCP 的 AI 可以用 HTTP 接口：`GET /api/pending` 列出等待处理的轮次，`GET /api/rounds/<id>/packet?format=md` 返回一轮的评论、上下文和处理要求，处理结果用 `POST /api/rounds/<id>/result` 提交，轮次之外推送新版本用 `POST /api/reports/<id>/versions`。两者都可以只提交改动（`edits`），不必传完整 Markdown，写法见评论包里的处理要求。图片用 `POST /api/reports/<id>/assets?name=fig.png` 上传（请求体是文件原始内容），在报告里写成 `![](assets/fig.png)`。
 
 2. **添加报告。** 让 AI「把这份报告发到 Galley」，或者点「添加报告」→「手动导入」，粘贴 Markdown 或拖入 `.md` 文件（「填入示例报告」可以载入示例）。
 3. **写评论。** 选中文字评论；鼠标移到段落或标题左侧，点评论图标评论整段或整章。用一句话说清要改什么，包括是否适用于全文。

@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 
 use crate::api::{Auth, Shared};
 use crate::domain::{Role, RoundStatus};
+use crate::edit::Edit;
 use crate::error::AppError;
 use crate::packet_md;
 use crate::store::ResultReq;
@@ -17,6 +18,20 @@ use crate::store::ResultReq;
 const PROTOCOL_VERSION: &str = "2025-06-18";
 
 fn tools() -> Value {
+    let edits = json!({
+        "type": "array",
+        "description": "Edits against the base Markdown source. Each one sets exactly one of old or block. {old, new}: replace text that occurs exactly once (add context until it does), or every occurrence with all: true. {block, new}: replace a whole block by its id from the round packet without quoting it, e.g. to rewrite a paragraph or redraw a diagram; an empty new deletes the block. Edits must not overlap.",
+        "items": {
+            "type": "object",
+            "properties": {
+                "old": { "type": "string", "description": "Exact Markdown source to replace, not rendered text." },
+                "all": { "type": "boolean", "default": false },
+                "block": { "type": "string" },
+                "new": { "type": "string" }
+            },
+            "required": ["new"]
+        }
+    });
     json!([
         {
             "name": "galley_list_reports",
@@ -54,12 +69,11 @@ fn tools() -> Value {
         },
         {
             "name": "galley_submit_round",
-            "description": "Atomically submit a round result: the full new Markdown, one reply per pending comment, and a round summary. action: changed (I edited the report), answered (answer without edits), clarify (question or disagreement). The agent can never resolve comments.",
+            "description": "Atomically submit a round result: one reply per pending comment and a round summary, plus the changes either as edits (preferred) or as the full new Markdown. action: changed (I edited the report), answered (answer without edits), clarify (question or disagreement). Put each edit under the reply of the comment it addresses; edits for nothing a comment asked go in the top-level edits. All edits apply to the round's base version at once; if any edit fails the whole submission is rejected. The agent can never resolve comments.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "round_id": { "type": "string" },
-                    "markdown": { "type": "string", "description": "Complete new Markdown. Omit if nothing changed." },
                     "replies": {
                         "type": "array",
                         "items": {
@@ -67,11 +81,14 @@ fn tools() -> Value {
                             "properties": {
                                 "comment_id": { "type": "string" },
                                 "action": { "type": "string", "enum": ["changed", "answered", "clarify"] },
-                                "body": { "type": "string" }
+                                "body": { "type": "string" },
+                                "edits": edits.clone()
                             },
                             "required": ["comment_id", "action", "body"]
                         }
                     },
+                    "edits": edits.clone(),
+                    "markdown": { "type": "string", "description": "Complete new Markdown, instead of edits. Use it only for restructuring too broad for edits. Omit both if nothing changed." },
                     "summary": { "type": "string", "description": "How many comments were handled, which sections changed, and any edits outside the comments." }
                 },
                 "required": ["round_id", "replies", "summary"]
@@ -79,15 +96,16 @@ fn tools() -> Value {
         },
         {
             "name": "galley_push_version",
-            "description": "Push a new version of a report outside the review loop (not allowed while a round is pending).",
+            "description": "Push a new version of a report outside the review loop (not allowed while a round is pending), as edits against the current version (preferred) or as the full new Markdown.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "report_id": { "type": "string" },
-                    "markdown": { "type": "string" },
+                    "edits": edits.clone(),
+                    "markdown": { "type": "string", "description": "Complete new Markdown, instead of edits." },
                     "note": { "type": "string" }
                 },
-                "required": ["report_id", "markdown"]
+                "required": ["report_id"]
             }
         }
     ])
@@ -162,9 +180,14 @@ fn call_tool(s: &Shared, role: Role, name: &str, args: &Value) -> Result<String,
             ))
         }
         "galley_push_version" => {
-            let v = s.store().push_version(
+            let edits: Vec<Edit> = match args.get("edits") {
+                Some(e) => serde_json::from_value(e.clone()).map_err(|e| AppError::BadRequest(format!("invalid edits: {e}")))?,
+                None => Vec::new(),
+            };
+            let v = s.store().push(
                 arg(args, "report_id")?,
-                arg(args, "markdown")?,
+                args.get("markdown").and_then(Value::as_str),
+                &edits,
                 args.get("note").and_then(Value::as_str).unwrap_or("推送新版本"),
                 role,
             )?;

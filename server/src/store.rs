@@ -12,6 +12,7 @@ use crate::anchor::{Anchor, AnchorState, relocate};
 use crate::db::{now_ms, random_token, short_id};
 use crate::diff::{BlockChange, BlockDiff, ChangeOp, compare, replacements};
 use crate::doc::{BlockId, BlockKind, Doc, parse};
+use crate::edit::{self, Edit};
 use crate::domain::{
     CommentAction, CommentStatus, Role, RoundAction, RoundStatus, comment_transition, round_transition,
 };
@@ -167,6 +168,9 @@ pub struct ReplyReq {
     pub comment_id: String,
     pub action: String,
     pub body: String,
+    /// The edits made for this comment, as an alternative to sending the whole new Markdown.
+    #[serde(default)]
+    pub edits: Vec<Edit>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -175,8 +179,21 @@ pub struct ResultReq {
     pub markdown: Option<String>,
     #[serde(default)]
     pub replies: Vec<ReplyReq>,
+    /// Edits outside the comments.
+    #[serde(default)]
+    pub edits: Vec<Edit>,
     #[serde(default)]
     pub summary: String,
+}
+
+impl ResultReq {
+    fn sourced_edits(&self) -> Vec<edit::Sourced<'_>> {
+        let replies = self.replies.iter().flat_map(|r| {
+            r.edits.iter().enumerate().map(|(i, e)| edit::Sourced { edit: e, comment_id: Some(&r.comment_id), index: i + 1 })
+        });
+        let outside = self.edits.iter().enumerate().map(|(i, e)| edit::Sourced { edit: e, comment_id: None, index: i + 1 });
+        replies.chain(outside).collect()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -191,6 +208,10 @@ pub struct PacketComment {
     pub context_before: Option<String>,
     pub context_after: Option<String>,
     pub src_lines: Option<(u32, u32)>,
+    /// The block an edit can replace with `{block, new}`; the section heading for a section comment.
+    pub block_id: Option<String>,
+    /// Markdown source of the commented lines, for writing `{old, new}` edits without fetching the whole report.
+    pub source: Option<String>,
     pub messages: Vec<Message>,
 }
 
@@ -403,6 +424,25 @@ impl Store {
     /// Pushes a new version outside the round flow (agent revision or owner rollback).
     pub fn push_version(&mut self, report_id: &str, markdown: &str, note: &str, role: Role) -> AppResult<Version> {
         self.push_version_pinned(report_id, markdown, note, &HashMap::new(), role)
+    }
+
+    /// Pushes a new version given either its whole Markdown or edits against the current version.
+    pub fn push(&mut self, report_id: &str, markdown: Option<&str>, edits: &[Edit], note: &str, role: Role) -> AppResult<Version> {
+        let markdown = match (markdown, edits.is_empty()) {
+            (Some(md), true) => md.to_string(),
+            (None, true) => return Err(AppError::BadRequest("缺少 markdown 或 edits".into())),
+            (Some(_), false) => {
+                return Err(AppError::BadRequest("markdown 和 edits 只能二选一：要么提交完整的新 Markdown，要么只提交改动".into()));
+            }
+            (None, false) => {
+                let current = self.current_version(report_id)?;
+                let sourced: Vec<edit::Sourced> =
+                    edits.iter().enumerate().map(|(i, e)| edit::Sourced { edit: e, comment_id: None, index: i + 1 }).collect();
+                edit::apply(&current.markdown, &current.doc, &sourced)
+                    .map_err(|e| AppError::BadRequest(format!("{e}。本次推送未生效")))?
+            }
+        };
+        self.push_version(report_id, &markdown, note, role)
     }
 
     fn push_version_pinned(
@@ -769,7 +809,7 @@ impl Store {
         let report = self.report_info(&round.report_id)?;
         let base = self.version(&round.base_version_id)?;
         let all = self.comments(&round.report_id, Some(&base.id))?;
-        let to_packet = |c: &Comment| packet_comment(c, &base.doc);
+        let to_packet = |c: &Comment| packet_comment(c, &base.doc, &base.markdown);
         Ok(Packet {
             report_id: report.id.clone(),
             report_title: report.title.clone(),
@@ -813,6 +853,12 @@ impl Store {
             if r.body.trim().is_empty() {
                 return Err(AppError::BadRequest(format!("{} 的回复内容为空", r.comment_id)));
             }
+            if !r.edits.is_empty() && r.action != "changed" {
+                return Err(AppError::BadRequest(format!(
+                    "{} 的 action 是 {}，不能带 edits；改了报告就用 changed",
+                    r.comment_id, r.action
+                )));
+            }
         }
         let missing: Vec<&str> = open.iter().map(|s| s.as_str()).filter(|id| !seen.contains(id)).collect();
         if !missing.is_empty() {
@@ -823,11 +869,22 @@ impl Store {
         }
 
         let base = load_version(&tx, &round.base_version_id)?;
+        let edits = req.sourced_edits();
+        let markdown = match (req.markdown.as_deref(), edits.is_empty()) {
+            (Some(_), false) => {
+                return Err(AppError::BadRequest("markdown 和 edits 只能二选一：要么提交完整的新 Markdown，要么只提交改动".into()));
+            }
+            (md, true) => md.map(str::to_string),
+            (None, false) => Some(
+                edit::apply(&base.markdown, &base.doc, &edits)
+                    .map_err(|e| AppError::BadRequest(format!("{e}。本次提交未生效")))?,
+            ),
+        };
         let mut result_vid = base.id.clone();
         let mut relocs = Vec::new();
         let mut diff = None;
         let mut result_doc = None;
-        if let Some(md) = req.markdown.as_deref().filter(|m| m.trim() != base.markdown.trim()) {
+        if let Some(md) = markdown.as_deref().filter(|m| m.trim() != base.markdown.trim()) {
             let note = format!("第 {} 轮修改", round.seq);
             let (vid, r) = insert_version(&tx, &round.report_id, md, Some(round_id), &note, &HashMap::new())?;
             let result = load_version(&tx, &vid)?;
@@ -1648,7 +1705,7 @@ fn section_titles(doc: &Doc) -> HashMap<String, String> {
     doc.blocks.iter().filter(|b| b.kind == BlockKind::Heading).map(|b| (b.id.clone(), b.text.clone())).collect()
 }
 
-fn packet_comment(c: &Comment, doc: &Doc) -> PacketComment {
+fn packet_comment(c: &Comment, doc: &Doc, markdown: &str) -> PacketComment {
     let (anchor_type, quote, block) = match &c.anchor {
         Anchor::Document => ("document", None, None),
         Anchor::Section { section_id } => ("section", None, doc.block(section_id)),
@@ -1699,6 +1756,12 @@ fn packet_comment(c: &Comment, doc: &Doc) -> PacketComment {
         block_text: block_text.filter(|_| anchor_type != "section"),
         context_before: if anchor_type == "section" { None } else { neighbor(idx.and_then(|i| i.checked_sub(1))) },
         context_after: if anchor_type == "section" { None } else { neighbor(last_idx.map(|i| i + 1)) },
+        block_id: block.map(|b| b.id.clone()),
+        // A section can be long, and the agent edits it from the full source anyway.
+        source: src_lines.filter(|_| anchor_type != "section").map(|(a, b)| {
+            let skip = a.saturating_sub(1) as usize;
+            markdown.lines().skip(skip).take((b as usize + 1).saturating_sub(a as usize)).collect::<Vec<_>>().join("\n")
+        }),
         src_lines,
         messages: c.messages.iter().filter(|m| !m.body.is_empty()).cloned().collect(),
     }

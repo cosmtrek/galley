@@ -13,6 +13,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::domain::Role;
+use crate::edit::Edit;
 use crate::error::{AppError, AppResult};
 use crate::packet_md;
 use crate::store::{CommentPatch, NewComment, ResultReq, Store};
@@ -188,8 +189,6 @@ async fn list_reports(State(s): State<Shared>, _: Auth) -> AppResult<Json<Value>
 #[derive(Deserialize)]
 struct MarkdownReq {
     markdown: String,
-    #[serde(default)]
-    note: Option<String>,
 }
 
 async fn create_report(State(s): State<Shared>, _: Auth, Json(req): Json<MarkdownReq>) -> AppResult<Json<Value>> {
@@ -235,13 +234,24 @@ async fn list_versions(State(s): State<Shared>, _: Auth, Path(id): Path<String>)
     Ok(Json(json!(s.store().versions(&id)?)))
 }
 
+#[derive(Deserialize)]
+struct PushReq {
+    #[serde(default)]
+    markdown: Option<String>,
+    #[serde(default)]
+    edits: Vec<Edit>,
+    #[serde(default)]
+    note: Option<String>,
+}
+
 async fn push_version(
     State(s): State<Shared>,
     Auth(role): Auth,
     Path(id): Path<String>,
-    Json(req): Json<MarkdownReq>,
+    Json(req): Json<PushReq>,
 ) -> AppResult<Json<Value>> {
-    let v = s.store().push_version(&id, &req.markdown, req.note.as_deref().unwrap_or("推送新版本"), role)?;
+    let note = req.note.as_deref().unwrap_or("推送新版本");
+    let v = s.store().push(&id, req.markdown.as_deref(), &req.edits, note, role)?;
     Ok(Json(json!({ "id": v.id, "seq": v.seq, "diff": v.diff })))
 }
 
