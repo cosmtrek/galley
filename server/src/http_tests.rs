@@ -330,6 +330,11 @@ async fn mcp_tools() {
     let (st, init, _) = t.req("POST", "/mcp", Who::Agent, Some(call(1, "initialize", json!({ "protocolVersion": "2025-06-18" })))).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(init["result"]["serverInfo"]["name"], "galley");
+    assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
+    for asked in [json!("1999-01-01"), Value::Null] {
+        let (_, init, _) = t.req("POST", "/mcp", Who::Agent, Some(call(1, "initialize", json!({ "protocolVersion": asked })))).await;
+        assert_eq!(init["result"]["protocolVersion"], "2025-11-25");
+    }
     let (st, _, _) = t.req("POST", "/mcp", Who::Agent, Some(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))).await;
     assert_eq!(st, StatusCode::ACCEPTED);
     let (_, list, _) = t.req("POST", "/mcp", Who::Agent, Some(call(2, "tools/list", json!({})))).await;

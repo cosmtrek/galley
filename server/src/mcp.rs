@@ -15,7 +15,8 @@ use crate::error::AppError;
 use crate::packet_md;
 use crate::store::ResultReq;
 
-const PROTOCOL_VERSION: &str = "2025-06-18";
+/// Newest first. Galley uses only what these share: tools with text content over JSON responses.
+const PROTOCOL_VERSIONS: [&str; 3] = ["2025-11-25", "2025-06-18", "2025-03-26"];
 
 fn tools() -> Value {
     let edits = json!({
@@ -132,7 +133,7 @@ fn call_tool(s: &Shared, role: Role, name: &str, args: &Value) -> Result<String,
             Ok(if out.is_empty() { "（还没有报告）".into() } else { out })
         }
         "galley_create_report" => {
-            let r = s.store().create_report(arg(args, "markdown")?)?;
+            let r = s.store().create_report(arg(args, "markdown")?, role)?;
             Ok(format!("已创建报告「{}」，report_id: {}，版本 v{}", r.title, r.id, r.current_seq))
         }
         "galley_get_source" => {
@@ -212,7 +213,10 @@ fn handle(s: &Shared, role: Role, msg: &Value) -> Option<Value> {
     let params = msg.get("params").cloned().unwrap_or(Value::Null);
     Some(match method {
         "initialize" => {
-            let version = params.get("protocolVersion").and_then(Value::as_str).unwrap_or(PROTOCOL_VERSION);
+            // Per the spec, answer with the client's version if supported, else our newest and let
+            // the client decide whether to disconnect.
+            let asked = params.get("protocolVersion").and_then(Value::as_str);
+            let version = PROTOCOL_VERSIONS.into_iter().find(|v| Some(*v) == asked).unwrap_or(PROTOCOL_VERSIONS[0]);
             rpc_result(
                 &id,
                 json!({
