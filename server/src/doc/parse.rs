@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::ops::Range;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 
 use pulldown_cmark::{CodeBlockKind, CowStr, Event, Options, Parser, Tag, TagEnd, html};
 
@@ -301,16 +302,41 @@ fn escape_html(s: &str) -> String {
 
 const MAX_DIAGRAM_SOURCE: usize = 256 * 1024;
 
+/// Rendered SVG (or failure) by Mermaid source. Layout takes seconds for large diagrams and
+/// every pushed version re-parses the whole report, so unchanged diagrams must not re-render.
+/// Kept in memory rather than reused from stored versions so a renderer upgrade takes effect.
+static MERMAID_CACHE: LazyLock<Mutex<MermaidCache>> = LazyLock::new(Default::default);
+
+const MERMAID_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Default)]
+struct MermaidCache {
+    entries: HashMap<String, Option<String>>,
+    bytes: usize,
+}
+
 fn render_mermaid(source: &str) -> Option<String> {
     if source.trim().is_empty() || source.len() > MAX_DIAGRAM_SOURCE {
         return None;
     }
+    if let Some(hit) = MERMAID_CACHE.lock().unwrap_or_else(|e| e.into_inner()).entries.get(source) {
+        return hit.clone();
+    }
     // The renderer is third-party layout code; a panic on odd input must not fail the import.
-    std::panic::catch_unwind(|| {
+    let svg = std::panic::catch_unwind(|| {
         mermaid_rs_renderer::render_with_options(source, mermaid_rs_renderer::RenderOptions::default()).ok()
     })
     .ok()
-    .flatten()
+    .flatten();
+    let mut cache = MERMAID_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let size = source.len() + svg.as_ref().map_or(0, String::len);
+    if cache.bytes + size > MERMAID_CACHE_BYTES {
+        *cache = MermaidCache::default();
+    }
+    if cache.entries.insert(source.to_string(), svg.clone()).is_none() {
+        cache.bytes += size;
+    }
+    svg
 }
 
 /// Accepts a standalone SVG document and makes sure it declares the SVG namespace, which
@@ -395,5 +421,22 @@ impl LineIndex {
             e -= 1;
         }
         (self.line_of(start), self.line_of(e.saturating_sub(1).max(start)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mermaid_renders_are_cached_by_source() {
+        let src = "flowchart LR\n  cache_probe_a --> cache_probe_b\n";
+        let first = render_mermaid(src).expect("renders");
+        assert!(MERMAID_CACHE.lock().unwrap().entries.contains_key(src));
+        assert_eq!(render_mermaid(src).as_deref(), Some(first.as_str()));
+
+        let bad = "cache_probe not a diagram ][\n";
+        assert_eq!(render_mermaid(bad), None);
+        assert_eq!(MERMAID_CACHE.lock().unwrap().entries.get(bad), Some(&None));
     }
 }
