@@ -77,7 +77,7 @@ cd server && cargo build --release && cd ..
 | `GALLEY_ADDR` | `127.0.0.1:7860`（Docker 下为 `0.0.0.0:7860`） | 监听地址 |
 | `GALLEY_DATA` | `./data`（Docker 下为 `/data`） | 数据库、上传文件和生成的密钥 |
 
-没有设置的密码和 token 会在首次启动时生成，并保存到 `<data>/secrets.json`。Galley 只提供 HTTP；要从其他机器访问，请放在带 TLS 的反向代理后面，并把 `GALLEY_PUBLIC_URL` 设为对应的 `https://` 地址。
+没有设置的密码和 token 会在首次启动时生成，并保存到 `<data>/secrets.json`。这个文件读不出来或写不进去时，服务会报错退出，不会每次启动都悄悄换一套新的。Galley 只提供 HTTP；要从其他机器访问，请放在带 TLS 的反向代理后面，并把 `GALLEY_PUBLIC_URL` 设为对应的 `https://` 地址。
 
 ## 使用
 
