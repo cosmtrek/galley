@@ -12,6 +12,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0007_report_archive.sql"),
     include_str!("../migrations/0008_rule_sig.sql"),
     include_str!("../migrations/0009_round_attribution.sql"),
+    include_str!("../migrations/0010_version_author.sql"),
 ];
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
@@ -53,6 +54,8 @@ mod tests {
              VALUES ('c', 'r', 'verify', 'global', 'draft', '全文核实', 'v', 0, 0);
              INSERT INTO rounds (id, report_id, seq, status, base_version_id, submitted_at, completed_at)
              VALUES ('rd', 'r', 1, 'verifying', 'v', 0, 5);
+             INSERT INTO versions (id, report_id, seq, markdown, html, blocks, created_at) VALUES ('v1', 'r', 1, '', '', '{}', 0);
+             INSERT INTO versions (id, report_id, seq, markdown, html, blocks, round_id, created_at) VALUES ('v2', 'r', 2, '', '', '{}', 'rd', 0);
              INSERT INTO assets (id, report_id, name, sha256, mime, path, created_at)
              VALUES ('a', 'r', 'fig.png', 'abc', 'image/png', './data/assets/r/fig.png', 0);",
         )
@@ -63,6 +66,9 @@ mod tests {
         let blob: String = conn.query_row("SELECT mime FROM asset_blobs WHERE sha256 = 'abc'", [], |r| r.get(0)).unwrap();
         assert_eq!(blob, "image/png");
         let completed: Option<i64> = conn.query_row("SELECT completed_at FROM rounds", [], |r| r.get(0)).unwrap();
+        let authors: Vec<Option<String>> =
+            conn.prepare("SELECT author FROM versions ORDER BY seq").unwrap().query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+        assert_eq!(authors, [None, Some("agent".to_string())]);
         assert_eq!(completed, None);
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
         assert_eq!(version, MIGRATIONS.len() as i64);

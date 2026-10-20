@@ -102,6 +102,8 @@ export interface VersionMeta {
   round_id: string | null;
   round_seq: number | null;
   note: string;
+  /** Null for versions pushed outside rounds before authors were recorded. */
+  author: Role | null;
   created_at: number;
   changes: number;
 }

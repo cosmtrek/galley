@@ -191,8 +191,8 @@ struct MarkdownReq {
     markdown: String,
 }
 
-async fn create_report(State(s): State<Shared>, _: Auth, Json(req): Json<MarkdownReq>) -> AppResult<Json<Value>> {
-    Ok(Json(json!(s.store().create_report(&req.markdown)?)))
+async fn create_report(State(s): State<Shared>, Auth(role): Auth, Json(req): Json<MarkdownReq>) -> AppResult<Json<Value>> {
+    Ok(Json(json!(s.store().create_report(&req.markdown, role)?)))
 }
 
 async fn get_report(State(s): State<Shared>, _: Auth, Path(id): Path<String>) -> AppResult<Json<Value>> {

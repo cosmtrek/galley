@@ -9,6 +9,15 @@ pub enum Role {
     Agent,
 }
 
+impl Role {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Role::Owner => "owner",
+            Role::Agent => "agent",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommentStatus {

@@ -67,6 +67,8 @@ pub struct Version {
     pub diff: Option<BlockDiff>,
     pub round_id: Option<String>,
     pub note: String,
+    /// Unknown for versions pushed outside rounds before this was recorded.
+    pub author: Option<Role>,
     pub created_at: i64,
 }
 
@@ -77,6 +79,7 @@ pub struct VersionMeta {
     pub round_id: Option<String>,
     pub round_seq: Option<i64>,
     pub note: String,
+    pub author: Option<Role>,
     pub created_at: i64,
     pub changes: usize,
 }
@@ -303,7 +306,7 @@ impl Store {
 
     // ----- reports & versions -----
 
-    pub fn create_report(&mut self, markdown: &str) -> AppResult<ReportInfo> {
+    pub fn create_report(&mut self, markdown: &str, author: Role) -> AppResult<ReportInfo> {
         let id = format!("r_{}", random_token());
         let now = now_ms();
         let tx = self.conn.transaction()?;
@@ -311,7 +314,7 @@ impl Store {
             "INSERT INTO reports (id, title, summary, created_at, updated_at) VALUES (?1, '', '', ?2, ?2)",
             params![id, now],
         )?;
-        insert_version(&tx, &id, markdown, None, "初稿", &HashMap::new(), &[])?;
+        insert_version(&tx, &id, markdown, None, "初稿", author, &HashMap::new(), &[])?;
         tx.commit()?;
         self.report_info(&id)
     }
@@ -414,7 +417,7 @@ impl Store {
 
     pub fn versions(&self, report_id: &str) -> AppResult<Vec<VersionMeta>> {
         let mut stmt = self.conn.prepare(
-            "SELECT v.id, v.seq, v.round_id, r.seq, v.note, v.created_at, v.block_diff
+            "SELECT v.id, v.seq, v.round_id, r.seq, v.note, v.created_at, v.block_diff, v.author
              FROM versions v LEFT JOIN rounds r ON r.id = v.round_id
              WHERE v.report_id = ?1 ORDER BY v.seq DESC",
         )?;
@@ -426,6 +429,7 @@ impl Store {
                 round_id: r.get(2)?,
                 round_seq: r.get(3)?,
                 note: r.get(4)?,
+                author: r.get::<_, Option<String>>(7)?.as_deref().map(parse_role),
                 created_at: r.get(5)?,
                 changes: diff
                     .and_then(|d| serde_json::from_str::<BlockDiff>(&d).ok())
@@ -480,7 +484,7 @@ impl Store {
         ensure_not_archived(&self.conn, report_id, role)?;
         self.ensure_no_pending_round(report_id)?;
         let tx = self.conn.transaction()?;
-        let (vid, relocs) = insert_version(&tx, report_id, markdown, None, note, pinned, spans)?;
+        let (vid, relocs) = insert_version(&tx, report_id, markdown, None, note, role, pinned, spans)?;
         for (cid, state) in relocs {
             if state == AnchorState::Orphaned {
                 transition_comment(&tx, &cid, CommentAction::Orphan, Role::Agent)?;
@@ -517,6 +521,7 @@ impl Store {
             round_id: m.round_id.clone(),
             round_seq: m.round_seq,
             note: m.note.clone(),
+            author: m.author,
             created_at: m.created_at,
             changes: m.changes,
         });
@@ -912,7 +917,7 @@ impl Store {
         if let Some(applied) = applied.as_ref().filter(|a| a.markdown.trim() != base.markdown.trim()) {
             let md = applied.markdown.as_str();
             let note = format!("第 {} 轮修改", round.seq);
-            let (vid, r) = insert_version(&tx, &round.report_id, md, Some(round_id), &note, &HashMap::new(), &applied.spans)?;
+            let (vid, r) = insert_version(&tx, &round.report_id, md, Some(round_id), &note, Role::Agent, &HashMap::new(), &applied.spans)?;
             let result = load_version(&tx, &vid)?;
             // Tables already broken in the base are the owner's content, not this result's fault.
             let pre_existing = |text: &str| base.doc.blocks.iter().any(|b| b.kind == BlockKind::Paragraph && b.text == text);
@@ -1465,10 +1470,7 @@ fn insert_message(
     body: &str,
     round_id: Option<&str>,
 ) -> AppResult<()> {
-    let author = match author {
-        Role::Owner => "owner",
-        Role::Agent => "agent",
-    };
+    let author = author.as_str();
     tx.execute(
         "INSERT INTO messages (comment_id, author, action, body, round_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![comment_id, author, action, body, round_id, now_ms()],
@@ -1483,6 +1485,7 @@ fn insert_version(
     markdown: &str,
     round_id: Option<&str>,
     note: &str,
+    author: Role,
     pinned: &HashMap<String, String>,
     spans: &[edit::Span],
 ) -> AppResult<(String, Vec<(String, AnchorState)>)> {
@@ -1523,9 +1526,9 @@ fn insert_version(
     let diff_json = diff.as_ref().map(serde_json::to_string).transpose()?;
     let vid = insert_with_id("v_", 8, |vid| {
         tx.execute(
-            "INSERT INTO versions (id, report_id, seq, markdown, html, blocks, block_diff, round_id, note, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![vid, report_id, seq, markdown, html, blocks, diff_json, round_id, note, now_ms()],
+            "INSERT INTO versions (id, report_id, seq, markdown, html, blocks, block_diff, round_id, note, author, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![vid, report_id, seq, markdown, html, blocks, diff_json, round_id, note, author.as_str(), now_ms()],
         )
     })?;
 
@@ -1559,7 +1562,7 @@ fn insert_version(
 }
 
 fn load_version(conn: &Connection, id: &str) -> AppResult<Version> {
-    let (report_id, seq, markdown, html, blocks, diff, round_id, note, created_at): (
+    let (report_id, seq, markdown, html, blocks, diff, round_id, note, created_at, author): (
         String,
         i64,
         String,
@@ -1569,10 +1572,11 @@ fn load_version(conn: &Connection, id: &str) -> AppResult<Version> {
         Option<String>,
         String,
         i64,
+        Option<String>,
     ) = conn.query_row(
-        "SELECT report_id, seq, markdown, html, blocks, block_diff, round_id, note, created_at FROM versions WHERE id = ?1",
+        "SELECT report_id, seq, markdown, html, blocks, block_diff, round_id, note, created_at, author FROM versions WHERE id = ?1",
         [id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?)),
     )?;
     Ok(Version {
         id: id.to_string(),
@@ -1584,8 +1588,13 @@ fn load_version(conn: &Connection, id: &str) -> AppResult<Version> {
         diff: diff.map(|d| serde_json::from_str(&d)).transpose()?,
         round_id,
         note,
+        author: author.as_deref().map(parse_role),
         created_at,
     })
+}
+
+fn parse_role(s: &str) -> Role {
+    if s == "agent" { Role::Agent } else { Role::Owner }
 }
 
 /// Reads a round exactly as stored. State changes must start from this, not from `load_round`.
@@ -1680,7 +1689,7 @@ fn load_comment(conn: &Connection, id: &str, at: Option<(&str, i64, &Doc)>) -> A
             let author: String = r.get(1)?;
             Ok(Message {
                 id: r.get(0)?,
-                author: if author == "agent" { Role::Agent } else { Role::Owner },
+                author: parse_role(&author),
                 action: r.get(2)?,
                 body: r.get(3)?,
                 round_id: r.get(4)?,

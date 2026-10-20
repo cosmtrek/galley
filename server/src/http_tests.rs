@@ -1189,3 +1189,25 @@ async fn a_whole_document_comment_leaves_declared_edits_extra() {
     assert_eq!(extra.len(), 1, "{res}");
     assert_eq!((extra[0]["new_text"].as_str(), &extra[0]["declared"]), (Some("原材料价格波动较大。"), &json!(true)), "{res}");
 }
+
+#[tokio::test]
+async fn versions_record_who_pushed_them() {
+    let t = T::new().await;
+    let (_, r, _) = t.req("POST", "/api/reports", Who::Agent, Some(json!({ "markdown": V1 }))).await;
+    let rid = r["id"].as_str().unwrap().to_string();
+    // The note is free text; only the author tells the owner's rollback from an agent claiming one.
+    let (st, _, _) = t
+        .req("POST", &format!("/api/reports/{rid}/versions"), Who::Agent, Some(json!({ "markdown": V2, "note": "回退到 v1" })))
+        .await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, versions, _) = t.req("GET", &format!("/api/reports/{rid}/versions"), Who::Owner, None).await;
+    let v1 = versions.as_array().unwrap().iter().find(|v| v["seq"] == 1).unwrap()["id"].as_str().unwrap().to_string();
+    let (st, _, _) = t.req("POST", &format!("/api/reports/{rid}/rollback"), Who::Owner, Some(json!({ "version_id": v1 }))).await;
+    assert_eq!(st, StatusCode::OK);
+
+    let (_, versions, _) = t.req("GET", &format!("/api/reports/{rid}/versions"), Who::Owner, None).await;
+    let authors: Vec<&str> = versions.as_array().unwrap().iter().map(|v| v["author"].as_str().unwrap()).collect();
+    assert_eq!(authors, ["owner", "agent", "agent"]);
+    let (_, v, _) = t.req("GET", &format!("/api/versions/{v1}"), Who::Owner, None).await;
+    assert_eq!(v["author"], "agent");
+}

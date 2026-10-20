@@ -138,7 +138,7 @@
               <span class="spacer"></span>
               {#if v.id === report?.current_version_id}<span class="badge">当前</span>{/if}
             </div>
-            <div class="small">{v.note}{#if v.seq > 1}{` · ${v.changes} 处改动`}{/if}</div>
+            <div class="small">{#if v.author}{`${v.author === "agent" ? "AI" : "我"} · `}{/if}{v.note}{#if v.seq > 1}{` · ${v.changes} 处改动`}{/if}</div>
             <div class="pick">
               <label><input type="radio" name="from" checked={v.id === from} onchange={() => pick("from", v.id)} /> 旧</label>
               <label><input type="radio" name="to" checked={v.id === to} onchange={() => pick("to", v.id)} /> 新</label>
